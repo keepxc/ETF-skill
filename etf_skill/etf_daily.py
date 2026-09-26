@@ -12,6 +12,7 @@ HERE        = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "dca_config.json"
 STATE_PATH  = HERE / "dca_state.json"
 FEE_CACHE   = HERE / "fee_cache.json"
+PREM_LOG    = HERE / "premium_log.json"
 
 WEEKDAY_CN  = ["周一","周二","周三","周四","周五","周六","周日"]
 NDX_PE_URL  = "https://historyofmarket.com/api/ndx/forward-pe.json"
@@ -170,6 +171,16 @@ def calc_premium(price, price_date, navs, cal):
     return {"prem": (price / nav - 1) * 100, "nav": nav, "nav_date": nd, "lag": lag}
 
 
+def log_premiums(rows, codes):
+    """按价格日期记录决策池溢价，供周报回顾。{price_date: {code: prem}}，保留 120 条"""
+    log = _load(PREM_LOG, {})
+    for c in codes:
+        r = rows.get(c, {})
+        if r.get("prem") is not None and r.get("price_date"):
+            log.setdefault(r["price_date"], {})[c] = round(r["prem"], 2)
+    _save(PREM_LOG, dict(sorted(log.items())[-120:]))
+
+
 # ── 定投决策 ──────────────────────────────────────────────
 
 def pick_tier(prem, tiers):
@@ -265,6 +276,7 @@ def main():
             errors.append(f"{c}净值")
         rows[c] = r
 
+    log_premiums(rows, pool)
     trading_today = any(q["ts"].date() == today for q in quotes.values())
     pool_ok = sorted((rows[c] for c in pool if rows[c]["prem"] is not None), key=lambda r: r["prem"])
     best = pool_ok[0] if pool_ok else None

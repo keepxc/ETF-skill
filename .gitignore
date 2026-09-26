@@ -11,3 +11,4 @@ __pycache__/
 # 运行时状态（生产机 cron 写入，不入库，避免 pull 冲突）
 etf_skill/dca_state.json
 etf_skill/fee_cache.json
+etf_skill/premium_log.json
