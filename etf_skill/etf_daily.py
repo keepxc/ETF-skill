@@ -1,215 +1,355 @@
-"""513300 纳指定投日报（精简版）"""
-import sys, json, urllib.request
+"""纳指 100 场内 ETF 定投日报（多标的比价 + 溢价档位定额）
 
-MONTHLY_DCA = 1000; DCA_WEEKDAY = 2
+溢价口径：收盘价(T) ÷ 官方净值(T 的前一个 A 股交易日) − 1。
+QDII 净值按美股收盘计价，A 股 T 日收盘时可知的最新美股信息是美股 T-1 收盘，
+故 T 日价格应与 T-1 净值配对（与券商 App / 腾讯行情显示的溢价率同口径）。
+该净值未公布时退用更早净值，并标注滞后交易日数。
+"""
+import sys, json, re, datetime, urllib.request
+from pathlib import Path
+
+HERE        = Path(__file__).resolve().parent
+CONFIG_PATH = HERE / "dca_config.json"
+STATE_PATH  = HERE / "dca_state.json"
+FEE_CACHE   = HERE / "fee_cache.json"
+
 WEEKDAY_CN  = ["周一","周二","周三","周四","周五","周六","周日"]
-BTC_URL     = "https://www.btcdca.me/nasdaq/api/score"
 NDX_PE_URL  = "https://historyofmarket.com/api/ndx/forward-pe.json"
 MKG_URL     = "https://www.marketgrep.com/api/summary"
+UA          = "Mozilla/5.0 (X11; Linux x86_64) Chrome/124.0 Safari/537.36"
 
 
-def _get(url, encoding="utf-8"):
-    h = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/124.0 Safari/537.36"}
+def _get(url, encoding="utf-8", referer=None, timeout=15):
+    h = {"User-Agent": UA}
+    if referer:
+        h["Referer"] = referer
     req = urllib.request.Request(url, headers=h)
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return resp.read().decode(encoding)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode(encoding, errors="replace")
 
 
-def fetch_btcdca():
-    d = json.loads(_get(BTC_URL))["data"]
-    ind = d.get("indicators", {})
-    return {"score": d["totalScore"], "yesterday": d.get("yesterdayScore"),
-            "mult": d["multiplier"], "status": d.get("status", ""),
-            "pe": ind.get("valuation", {}).get("pe"),
-            "vix": ind.get("macro", {}).get("vix"),
-            "fear": ind.get("sentiment", {}).get("fearGreed"),
-            "rsi": ind.get("technical", {}).get("rsi")}
+def _mkt(code):
+    return "sh" if code.startswith("5") else "sz"
 
 
-def fetch_513300():
-    raw = _get("https://qt.gtimg.cn/q=sh513300", encoding="gbk")
-    f = raw.split("~")
-    if len(f) < 40:
-        return {"price": None, "prev_close": None, "name": "513300"}
-    return {
-        "price": float(f[3]) if f[3] else None,
-        "prev_close": float(f[4]) if f[4] else None,
-        "name": f[1],
-    }
+def _load(path, default):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
 
 
-def fetch_nav():
-    url = "https://api.fund.eastmoney.com/f10/lsjz?fundCode=513300&pageIndex=1&pageSize=1"
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0", "Referer": "https://fund.eastmoney.com/513300.html"})
-    d = json.loads(urllib.request.urlopen(req, timeout=10).read().decode("utf-8"))
-    lst = d.get("Data", {}).get("LSJZList", [])
-    return (float(lst[0]["DWJZ"]), lst[0]["FSRQ"]) if lst else (None, None)
+def _save(path, obj):
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ── 数据获取 ──────────────────────────────────────────────
+
+def fetch_quotes(codes):
+    """腾讯行情批量取价。返回 {code: {name, price, prev_close, ts}}"""
+    raw = _get("https://qt.gtimg.cn/q=" + ",".join(_mkt(c) + c for c in codes), encoding="gbk")
+    out = {}
+    for line in raw.strip().split(";"):
+        f = line.split("~")
+        if len(f) < 40:
+            continue
+        try:
+            out[f[2]] = {
+                "name": f[1],
+                "price": float(f[3]) if f[3] else None,
+                "prev_close": float(f[4]) if f[4] else None,
+                "ts": datetime.datetime.strptime(f[30], "%Y%m%d%H%M%S"),
+            }
+        except (ValueError, IndexError):
+            continue
+    return out
+
+
+def fetch_kline(code, n=30):
+    """日 K（不复权）。返回 [(date_str, close, turnover_yuan)]；成交量单位为手"""
+    url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={_mkt(code)}{code},day,,,{n},"
+    d = json.loads(_get(url))["data"][_mkt(code) + code]
+    rows = d.get("day") or d.get("qfqday") or []
+    return [(r[0], float(r[2]), float(r[5]) * 100 * float(r[2])) for r in rows]
+
+
+def fetch_navs(code):
+    """东财官方净值（最近 20 条）。返回 {date_str: nav}"""
+    url = f"https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}&pageIndex=1&pageSize=20"
+    d = json.loads(_get(url, referer=f"https://fund.eastmoney.com/{code}.html", timeout=10))
+    return {x["FSRQ"]: float(x["DWJZ"]) for x in d.get("Data", {}).get("LSJZList", []) if x.get("DWJZ")}
+
+
+def fetch_fee(code):
+    """东财费率页：管理费 + 托管费（%/年）"""
+    t = _get(f"https://fundf10.eastmoney.com/jjfl_{code}.html", timeout=10)
+    t = re.sub(r"<[^>]+>", " ", t)
+    mg = re.search(r"管理费率\s*([\d.]+)%", t)
+    cu = re.search(r"托管费率\s*([\d.]+)%", t)
+    if not (mg and cu):
+        raise ValueError("费率解析失败")
+    return round(float(mg.group(1)) + float(cu.group(1)), 4)
+
+
+def get_fees(codes, refresh_days):
+    """按周刷新费率；返回 ({code: fee}, [变动提示], [失败代码])"""
+    cache = _load(FEE_CACHE, {})
+    today = datetime.date.today()
+    changes, failed = [], []
+    for c in codes:
+        ent = cache.get(c)
+        fresh = ent and (today - datetime.date.fromisoformat(ent["date"])).days < refresh_days
+        if fresh:
+            continue
+        try:
+            fee = fetch_fee(c)
+        except Exception:
+            failed.append(c)
+            continue
+        if ent and abs(ent["fee"] - fee) > 1e-9:
+            changes.append(f"{c} 费率 {ent['fee']:.2f}% → {fee:.2f}%")
+        cache[c] = {"fee": fee, "date": today.isoformat()}
+    _save(FEE_CACHE, cache)
+    return {c: cache[c]["fee"] for c in codes if c in cache}, changes, failed
 
 
 def fetch_ndx_pe():
     try:
-        d = json.loads(_get(NDX_PE_URL))
-        c = d.get("current", {})
+        c = json.loads(_get(NDX_PE_URL)).get("current", {})
         return {"t": c.get("trailing"), "f": c.get("forward")}
     except Exception:
-        return {"t": None, "f": None}
+        return None
 
 
 def fetch_marketgrep():
     try:
         d = json.loads(_get(MKG_URL))
-        u = d.get("us", {})
-        t = d.get("turbulence", {})
-        regime = u.get("regime", "")
-        score = u.get("exposure_score")
-        dspx = u.get("dspx")
-        cor1m = u.get("cor1m")
-        vix = u.get("vix")
-        turb = t.get("state", "")
-        rl = "🔵 Risk ON" if "risk_on" in regime else "🔴 Risk OFF" if "risk_off" in regime else regime
-        # 分散度描述
-        if dspx and dspx > 35:      disp = "分散度高"
-        elif dspx and dspx > 25:    disp = "分散中等"
-        else:                        disp = "集中度高"
-        # 相关性描述
-        if cor1m is not None:
-            if cor1m < 15:           cor_str = "个股分化"
-            elif cor1m < 30:         cor_str = "板块联动"
-            else:                    cor_str = "同涨同跌"
-        else:
-            cor_str = ""
-        return {"line": f"🌡 市场: {rl} ({score}) | {disp} | {cor_str} | 湍流{turb}" if turb else f"🌡 市场: {rl} ({score}) | {disp} | {cor_str}"}
     except Exception:
-        return {"line": ""}
+        return None
+    u, t = d.get("us", {}), d.get("turbulence", {})
+    regime = u.get("regime", "")
+    dspx, cor1m = u.get("dspx"), u.get("cor1m")
+    rl = "Risk ON" if "risk_on" in regime else "Risk OFF" if "risk_off" in regime else regime
+    disp = "分散度高" if dspx and dspx > 35 else "分散中等" if dspx and dspx > 25 else "集中度高"
+    parts = [f"VIX {u.get('vix')}", f"{rl} ({u.get('exposure_score')})", disp]
+    if cor1m is not None:
+        parts.append("个股分化" if cor1m < 15 else "板块联动" if cor1m < 30 else "同涨同跌")
+    if t.get("state"):
+        parts.append(f"湍流 {t['state']}")
+    return " | ".join(parts)
 
 
-def _sco(s):
-    if s is None: return "─"
-    if s >= 70: return "🟢"
-    if s >= 55: return "🟡"
-    if s >= 40: return "🟠"
-    return "🔴"
+# ── 溢价计算 ──────────────────────────────────────────────
+
+def price_basis(q, cal, now):
+    """确定用于溢价的价格及其日期。
+    盘中(≥09:30)用实时价；集合竞价/盘前用昨收；休市用最近收盘。"""
+    ts = q["ts"]
+    if ts.date() == now.date():
+        if ts.time() >= datetime.time(9, 30):
+            return q["price"], now.date().isoformat(), "实时"
+        prev = [d for d in cal if d < now.date().isoformat()]
+        return q["prev_close"], (prev[-1] if prev else None), "昨收"
+    return q["price"], ts.date().isoformat(), "收盘"
 
 
-def _status(s):
-    if "高估" in s: return "🔴 高估"
-    if "偏高" in s: return "🟠 偏高"
-    if "合理" in s: return "🟡 合理"
-    if "低估" in s: return "🟢 低估"
-    return s
+def calc_premium(price, price_date, navs, cal):
+    """返回 dict(prem, nav, nav_date, lag) 或 None"""
+    if not (price and price_date and navs):
+        return None
+    prev = [d for d in cal if d < price_date]
+    if not prev:
+        return None
+    expected = prev[-1]
+    usable = sorted(d for d in navs if d <= expected)
+    if not usable:
+        return None
+    nd = usable[-1]
+    lag = sum(1 for d in cal if nd < d <= expected)
+    nav = navs[nd]
+    return {"prem": (price / nav - 1) * 100, "nav": nav, "nav_date": nd, "lag": lag}
 
 
-if __name__ == "__main__":
+# ── 定投决策 ──────────────────────────────────────────────
+
+def pick_tier(prem, tiers):
+    for t in tiers:
+        if t["below"] is None or prem < t["below"]:
+            return t
+    return tiers[-1]
+
+
+def plan_amount(tier, base, backlog, cap):
+    """返回 (本次投入, 投后积压)。
+    低档位(release_backlog)：max(档位金额, 基准 + 全部积压)；
+    其余：按档位金额，少投部分计入积压，积压不超过 cap。"""
+    if tier.get("release_backlog"):
+        return max(tier["amount"], base + backlog), 0
+    amt = tier["amount"]
+    return amt, min(cap, backlog + max(0, base - amt))
+
+
+def commission(amount, cfg):
+    c = cfg["commission"]
+    if amount <= 0:
+        return 0.0
+    fee = amount * c["rate"]
+    return fee if c["free_of_min"] else max(fee, c["min_per_order"])
+
+
+def is_dca_day(today, trading_today, dca_day, state):
+    month = today.strftime("%Y-%m")
+    return trading_today and today.day >= dca_day and state.get("last_dca_month") != month
+
+
+def next_dca_label(today, dca_day, state):
+    if state.get("last_dca_month") != today.strftime("%Y-%m"):
+        if today.day >= dca_day:
+            return "下一个交易日（本月尚未执行）"
+        return f"{today.month}月{dca_day}日（遇休市顺延）"
+    m = 1 if today.month == 12 else today.month + 1
+    return f"{m}月{dca_day}日（遇休市顺延）"
+
+
+# ── 主流程 ────────────────────────────────────────────────
+
+def main():
     if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    b = fetch_btcdca()
-    etf = fetch_513300()
-    nav, nd = fetch_nav()
-    pe = fetch_ndx_pe()
-    mg = fetch_marketgrep()
-    wi = __import__("datetime").datetime.now().weekday()
-    wk = round(MONTHLY_DCA / 4)
+    cfg   = _load(CONFIG_PATH, None)
+    state = _load(STATE_PATH, {"backlog": 0, "last_dca_month": None, "history": []})
+    now   = datetime.datetime.now()
+    today = now.date()
+    pool, watch = cfg["pool"], cfg["watch"]
+    errors = []
 
-    # 溢率：保证价格和净值同一天
-    today_str = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
-    if nd == today_str:
-        # 净值是最新的，用实时价格
-        price_for_prem = etf["price"]
-        prem_label_prefix = "实时"
+    try:
+        quotes = fetch_quotes(pool + watch)
+    except Exception as e:
+        quotes = {}
+        errors.append(f"行情({type(e).__name__})")
+
+    cal = []
+    try:
+        cal = [r[0] for r in fetch_kline(pool[0], 60)]
+    except Exception as e:
+        errors.append(f"交易日历({type(e).__name__})")
+
+    fees, fee_changes, fee_failed = get_fees(pool + watch, cfg["fee_refresh_days"])
+    if fee_failed:
+        errors.append("费率:" + ",".join(fee_failed))
+
+    rows = {}
+    for c in pool + watch:
+        q = quotes.get(c)
+        r = {"code": c, "name": q["name"] if q else c, "fee": fees.get(c), "prem": None}
+        if not q:
+            errors.append(f"{c}行情")
+            rows[c] = r
+            continue
+        price, pdate, plabel = price_basis(q, cal, now)
+        r.update(price=price, price_date=pdate, price_label=plabel)
+        try:
+            k = fetch_kline(c, 20)
+            r["avg_turnover"] = sum(x[2] for x in k) / len(k) / 1e8 if k else None
+        except Exception:
+            r["avg_turnover"] = None
+        try:
+            pr = calc_premium(price, pdate, fetch_navs(c), cal)
+        except Exception:
+            pr = None
+        if pr:
+            r.update(pr)
+        else:
+            errors.append(f"{c}净值")
+        rows[c] = r
+
+    trading_today = any(q["ts"].date() == today for q in quotes.values())
+    pool_ok = sorted((rows[c] for c in pool if rows[c]["prem"] is not None), key=lambda r: r["prem"])
+    best = pool_ok[0] if pool_ok else None
+
+    # ── 输出 ──
+    L = ["", "=" * 48, "  📊 纳指 100 场内 ETF 定投日报",
+         f"  📅 {now:%m-%d %H:%M}（{WEEKDAY_CN[today.weekday()]}{'' if trading_today else ' · 休市'}）",
+         "=" * 48]
+    if errors:
+        L.append(f"  ⚠ 部分数据获取失败：{'、'.join(dict.fromkeys(errors))}")
+
+    L += ["", "【标的比价】决策池，按溢价升序"]
+    for r in pool_ok + [rows[c] for c in pool if rows[c]["prem"] is None]:
+        fee = f"{r['fee']:.2f}%" if r["fee"] is not None else "费率缺失"
+        tv  = f"{r['avg_turnover']:.2f}亿" if r.get("avg_turnover") else "成交缺失"
+        if r["prem"] is None:
+            L.append(f"  {r['code']} {r['name']}  数据缺失")
+            continue
+        tag = "  ← 最低" if r is best else ""
+        L.append(f"  {r['code']} {r['name']}  价 {r['price']:.3f}  溢价 {r['prem']:+.2f}%  "
+                 f"费率 {fee}  日均 {tv}{tag}")
+
+    if best:
+        L += ["", "【溢价口径】收盘价(T) ÷ 官方净值(T 前一交易日)",
+              f"  {best['code']}：{best['price_label']} {best['price_date']} {best['price']:.3f}"
+              f" ÷ 净值 {best['nav_date']} {best['nav']:.4f}"]
+        lagged = [r["code"] for r in pool_ok if r["lag"] > 0]
+        if lagged:
+            L.append(f"  ⚠ {','.join(lagged)} 净值滞后 {max(r['lag'] for r in pool_ok)} 个交易日，"
+                     "溢价含未计入的指数涨跌，仅供参考")
+
+    # 监视池提示
+    wa = cfg["watch_alert"]
+    alerts = [rows[c] for c in watch
+              if rows[c]["prem"] is not None and best
+              and (rows[c].get("avg_turnover") or 0) >= wa["min_avg_turnover_yi"]
+              and rows[c]["prem"] <= best["prem"] - wa["premium_gap_pct"]]
+    if alerts or fee_changes:
+        L += ["", "【监视提示】"]
+        for r in alerts:
+            L.append(f"  {r['code']} {r['name']} 溢价 {r['prem']:+.2f}%（比 {best['code']} 低 "
+                     f"{best['prem'] - r['prem']:.2f}pct，日均 {r['avg_turnover']:.2f}亿），可考虑调入决策池")
+        for s in fee_changes:
+            L.append(f"  ⚠ {s}")
+
+    pe, mg = fetch_ndx_pe(), fetch_marketgrep()
+    if (pe and pe.get("f")) or mg:
+        L += ["", "【市场状态】"]
+        if pe and pe.get("f"):
+            L.append(f"  NDX PE: Tr {pe['t']} | Fwd {pe['f']}")
+        if mg:
+            L.append(f"  {mg}")
+
+    # 定投建议
+    base, cap = cfg["monthly_base_amount"], cfg["backlog_cap"]
+    backlog = state.get("backlog", 0)
+    L += ["", "=" * 48, "  💡 定投建议", "=" * 48]
+    if not best:
+        L.append("  ★ 决策池溢价数据缺失，无法给出金额，请人工查看")
     else:
-        # 净值是昨天的，用昨收价（同一天对比）
-        price_for_prem = etf["prev_close"]
-        prem_label_prefix = "昨日"
+        tier = pick_tier(best["prem"], cfg["premium_tiers"])
+        amount, new_backlog = plan_amount(tier, base, backlog, cap)
+        dca_now = is_dca_day(today, trading_today, cfg["dca_day"], state)
+        head = "今日定投" if dca_now else f"按当前溢价预估（下次定投：{next_dca_label(today, cfg['dca_day'], state)}）"
+        L.append(f"  ★ {head}：{amount} 元（{tier['label']}）")
+        if amount > 0:
+            L.append(f"  ★ 标的：{best['code']} {best['name']}（溢价 {best['prem']:+.2f}%，决策池最低）")
+        L.append(f"  ★ 依据：溢价 {best['prem']:.2f}%（{best['price_date']} 价 ÷ {best['nav_date']} 净值）")
+        cm = commission(amount, cfg)
+        if amount > 0:
+            L.append(f"  ★ 预估佣金 {cm:.2f} 元（占 {cm / amount * 100:.2f}%）")
+        L.append(f"  ★ 积压资金：{backlog} 元 → 投后 {new_backlog} 元（上限 {cap}）")
+        if not cfg["commission"]["free_of_min"]:
+            L.append("  ★ 未免 5：只做月投，勿拆周投")
+        if dca_now:
+            state["backlog"] = new_backlog
+            state["last_dca_month"] = today.strftime("%Y-%m")
+            state.setdefault("history", []).append({
+                "date": today.isoformat(), "code": best["code"], "premium": round(best["prem"], 2),
+                "tier": tier["label"], "amount": amount, "backlog_after": new_backlog})
+            _save(STATE_PATH, state)
 
-    if price_for_prem and nav:
-        p = (price_for_prem - nav) / nav * 100
-        if p > 8.5:      pl = f"🔴 极端({prem_label_prefix})"
-        elif p > 5:      pl = f"🟡 偏高({prem_label_prefix})"
-        elif p > 3:      pl = f"🟠 略高({prem_label_prefix})"
-        elif p > 0:      pl = f"🟢 正常({prem_label_prefix})"
-        else:            pl = f"🔵 折价({prem_label_prefix})"
-    else:
-        p, pl = None, "─"
+    L += ["=" * 48, ""]
+    print("\n".join(L))
 
-    # DCA
-    dca = round(wk * b["mult"]) if wi == DCA_WEEKDAY else 0
-    if dca:
-        if b["mult"] < 0.9:   tag = "🔴 减量"
-        elif b["mult"] > 1.1: tag = "🟢 加量"
-        else:                 tag = "✅ 正常"
-        dl = f"{tag}定投 {dca} 元"
-    else:
-        dl = "非定投日"
 
-    # PE
-    pe_line = ""
-    if pe and pe.get("f"):
-        fpe, tpe = pe["f"], pe.get("t")
-        gap = round((tpe / fpe - 1) * 100) if tpe else None
-        if fpe < 22:   note = "偏低"
-        elif fpe < 28: note = "适中"
-        elif fpe < 35: note = "偏高"
-        else:          note = "高估"
-        pe_line = f"  📐 PE: Tr {tpe} | Fwd {fpe} ({note}，增长预期{gap}%)"
-
-    dets = []
-    if b.get("pe"):   dets.append(f"PE {b['pe']}")
-    if b.get("vix"):  dets.append(f"VIX {b['vix']}")
-    if b.get("fear") is not None: dets.append(f"恐慌 {b['fear']}")
-    if b.get("rsi"):  dets.append(f"RSI {round(b['rsi'], 1)}")
-    det_str = " | ".join(dets) if dets else ""
-
-    lines = [
-        "",
-        "=" * 48,
-        f"  📊 513300 日报",
-        f"  📅 {__import__('datetime').datetime.now().strftime('%m-%d %H:%M')} ({WEEKDAY_CN[wi]})",
-        "=" * 48,
-        "",
-        f"  🏷 {etf['name']}  现价 {etf['price'] or '─'}  净值 {nav or '─'}({nd or '─'})",
-    ]
-    if price_for_prem == etf["prev_close"] and etf["price"] != etf["prev_close"] and etf["price"]:
-        # 用了昨收价，加一行实时价参考
-        lines.append(f"     昨收 {etf['prev_close']}（用于溢率计算）  实时 {etf['price']}")
-    if p is not None:
-        lines.append(f"  溢率 {p:+.2f}%  {pl}")
-    lines += [
-        "",
-        f"  🔗 btcdca: {b['score']}/100 {_sco(b['score'])}  {_status(b['status'])}  倍数 {b['mult']}x",
-    ]
-    if det_str:
-        lines.append(f"  {det_str}")
-    if pe_line:
-        lines.append("")
-        lines.append(pe_line)
-    if mg and mg.get("line"):
-        lines.append(f"  {mg['line']}")
-    # 操作理由
-    reasons = []
-    if b["score"] is not None and b["score"] <= 50:
-        reasons.append(f"btcdca评分{b['score']}/100偏高")
-    elif b["score"] is not None and b["score"] >= 65:
-        reasons.append(f"btcdca评分{b['score']}/100偏低")
-    if p is not None and p > 5:
-        reasons.append(f"溢率{p:.1f}%极端")
-    elif p is not None and p < 0:
-        reasons.append(f"溢率折价{p:.1f}%")
-    reason_str = "，".join(reasons) if reasons else "信号中性"
-
-    lines += [
-        "",
-        "=" * 48,
-        "  💡 操作建议",
-        "=" * 48,
-        "",
-        f"  ★ {dl}",
-        f"     依据: {reason_str}",
-        "",
-        "─" * 48,
-        f"  【周{wk}元 | 月{MONTHLY_DCA}元】",
-        "─" * 48,
-        "",
-    ]
-    print("\n".join(filter(None, lines)))
+if __name__ == "__main__":
+    main()

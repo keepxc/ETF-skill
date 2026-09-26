@@ -1,0 +1,23 @@
+{
+  "monthly_base_amount": 1000,
+  "dca_day": 15,
+  "backlog_cap": 5000,
+  "commission": {
+    "rate": 0.0003,
+    "min_per_order": 5,
+    "free_of_min": false
+  },
+  "premium_tiers": [
+    {"below": 6.0,  "amount": 1500, "label": "加码档", "release_backlog": true},
+    {"below": 10.0, "amount": 1000, "label": "标准档"},
+    {"below": 14.0, "amount": 500,  "label": "减半档"},
+    {"below": null, "amount": 0,    "label": "暂停档"}
+  ],
+  "pool": ["513390", "513870", "159660"],
+  "watch": ["159501", "159941", "513100", "159632", "159659", "159513", "159696", "513110"],
+  "watch_alert": {
+    "min_avg_turnover_yi": 1.0,
+    "premium_gap_pct": 1.0
+  },
+  "fee_refresh_days": 7
+}
