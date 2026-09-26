@@ -1,0 +1,9 @@
+# 非 ETF 内容（同目录下不纳入本仓库）
+discovery/
+telegram_send.py
+*.pyc
+__pycache__/
+*.swp
+*.bak
+.env
+*.log
