@@ -1,17 +1,19 @@
-"""纳指择时信号：QQQ vs MA200 止盈 + 回撤加仓档位（自 legacy 恢复）
-
-出处
-----
-- 止盈信号   legacy/etf_check_v1.3_2026-05.py       dev200 阈值 20 / 12 / 0
-- 回撤加仓   legacy/etf_monitor/nasdaq_drawdown.py  五档 + 待命金 / 风暴金 资金池
+"""回撤加仓档位（资金池）—— 自 legacy/etf_monitor/nasdaq_drawdown.py 恢复
 
 定位（与月度定投是两笔独立的钱）
 ----
   · 月度定投 = 每月 1000 基准、按溢价档位定额（不拆分），走 etf_daily.plan_amount
   · 回撤加仓 = 从资金池出钱；资金池**没有月度充值**（月投不拆分），
-               来源是止盈回款 + 人工注入；本模块只做提示 + 去重，不自动交易
-数据源：Yahoo Finance QQQ 日线（必须走 7890 代理）+ 腾讯 usQQQ 实时价。
+               来源为人工注入；本模块只做提示 + 去重，不自动交易
+数据源：Yahoo Finance QQQ 日线（必须走 7890 代理）。
 参数集中在 dca_config.json 的 "signals" 块，本文件只留默认值兜底。
+
+历史说明
+----
+原一并恢复的「QQQ vs MA200 止盈信号」已于 2026-10-03 移除：
+用 QQQ 1999-2026 全历史验证后不成立（>20% 止盈的劣势完全由 2000-2002 泡沫期定义，
+2020-2026 反而好于基准；事件化后"上穿 20%"其后 12 个月 9/9 全部上涨；
+"跌破 MA200 = 熊市"同样不成立）。完整数据见 docs/qqq-ma200-validation.md。
 """
 import json, time, datetime, urllib.request
 from pathlib import Path
@@ -23,7 +25,6 @@ UA         = "Mozilla/5.0"   # Yahoo 对完整浏览器 UA 会走 429 限流通�
 
 # 与 legacy 一致的默认参数（可被 dca_config.json["signals"] 覆盖）
 DEFAULTS = {
-    "qqq_ma200": {"trim_pct": 20.0, "warn_pct": 12.0, "range": "2y"},
     "drawdown_levels": [
         {"level": 8,  "amount": 300, "source": "待命金"},
         {"level": 15, "amount": 500, "source": "待命金"},
@@ -33,7 +34,7 @@ DEFAULTS = {
     ],
 }
 
-# 初始资金池（沿用 legacy/etf_monitor/nasdaq_state.json 的余额）
+# 资金池初始值（沿用 legacy/etf_monitor/nasdaq_state.json 的余额；人工维护，无月度充值）
 INIT_STATE = {"reserve_balance": 300, "storm_balance": 100, "triggered_levels": []}
 
 
@@ -84,34 +85,7 @@ def fetch_qqq_closes(rng="2y"):
     raise last
 
 
-def fetch_qqq_realtime():
-    """腾讯 usQQQ 实时价（失败返回 None，调用方降级用日线收盘）。"""
-    try:
-        raw = _http("https://qt.gtimg.cn/q=usQQQ", timeout=10)
-        f = raw.split("~")
-        return {"price": float(f[3]), "prev_close": float(f[4]),
-                "change_pct": float(f[32]) if len(f) > 32 and f[32] else None}
-    except Exception:
-        return None
-
-
 # ── 信号计算 ──────────────────────────────────────────────
-
-def ma200_signal(closes, trim_pct=20.0, warn_pct=12.0):
-    if len(closes) < 200:
-        return None
-    ma = sum(closes[-200:]) / 200
-    dev = (closes[-1] - ma) / ma * 100
-    if dev > trim_pct:
-        sig = f"🔴 乖离 {dev:+.2f}%，考虑止盈波段仓"
-    elif dev > warn_pct:
-        sig = f"🟡 乖离 {dev:+.2f}%，偏高，持有观望"
-    elif dev > 0:
-        sig = f"🟢 乖离 {dev:+.2f}%，正常"
-    else:
-        sig = f"🔵 乖离 {dev:+.2f}%，价格低于 MA200（熊市信号）"
-    return {"ma200": round(ma, 2), "dev": round(dev, 2), "signal": sig}
-
 
 def drawdown(closes, lookback=252):
     w = closes[-lookback:]
@@ -145,37 +119,24 @@ def _bar(pct, width=15):
 
 
 def render_sections(cfg, best=None):
-    """返回日报用的两节文本（list[str]）。任一数据源失败只影响本节。"""
+    """返回日报用的一节文本（list[str]）。数据源失败只影响本节。"""
     sig_cfg = cfg_signals(cfg)
     state = _load(ALLOC_PATH, {"reserve_balance": INIT_STATE["reserve_balance"],
                               "storm_balance": INIT_STATE["storm_balance"],
-                              "triggered_levels": [], "last_topup_month": None})
+                              "triggered_levels": []})
     L, dirty = [], False
 
     try:
-        closes = fetch_qqq_closes(sig_cfg["qqq_ma200"].get("range", "2y"))
-        ma = ma200_signal(closes, sig_cfg["qqq_ma200"].get("trim_pct", 20.0),
-                          sig_cfg["qqq_ma200"].get("warn_pct", 12.0))
+        closes = fetch_qqq_closes("2y")
         dd = drawdown(closes)
-        rt = fetch_qqq_realtime()
-        price = rt["price"] if rt else dd["current"]
-        chg = f"（{rt['change_pct']:+.2f}%）" if rt and rt.get("change_pct") is not None else ""
 
-        L += ["", "=" * 48, "  📈 纳指止盈信号（QQQ vs MA200）", "=" * 48]
-        if ma is None:
-            L.append("  ⚠ QQQ 日线不足 200 根，无法计算 MA200")
-        else:
-            L.append(f"  QQQ {price:.2f}{chg}   MA200 {ma['ma200']:.2f}")
-            L.append(f"  {ma['signal']}")
-        L.append(f"  自 52 周高点回撤 {dd['dd']:+.2f}%（高点 {dd['high']:.2f}，{dd['days_since_high']} 个交易日前）")
-        if ma and ma["dev"] > sig_cfg["qqq_ma200"].get("trim_pct", 20.0):
-            L.append("  ★ 触发止盈阈值：卖出波段仓，回款入待命金（人工执行）")
-
-        # ── 回撤加仓档位 ──
         levels = sig_cfg["drawdown_levels"]
         if reset_if_recovered(dd["dd"], state, levels):
             dirty = True
+
         L += ["", "=" * 48, "  📉 回撤加仓档位（资金池）", "=" * 48]
+        L.append(f"  QQQ {dd['current']:.2f}｜自 52 周高点 {dd['high']:.2f} 回撤 {dd['dd']:+.2f}%"
+                 f"（高点 {dd['days_since_high']} 个交易日前）")
         for lv in levels:
             used = lv["level"] in state.get("triggered_levels", [])
             hit = dd["dd"] <= -lv["level"]
@@ -185,8 +146,8 @@ def render_sections(cfg, best=None):
         L.append(f"  💰 待命金 {state.get('reserve_balance', 0)} 元 | "
                  f"风暴金 {state.get('storm_balance', 0)} 元 | "
                  f"合计 {state.get('reserve_balance', 0) + state.get('storm_balance', 0)} 元")
+        L.append("  （资金池无月度充值，靠人工注入维护余额）")
 
-        L.append("  （资金池无月度充值：来源为止盈回款 + 人工注入，余额手工维护）")
         trig = check_triggers(dd["dd"], state, levels)
         if trig:
             L.append("  🚨 档位触发（与月度定投是两笔钱）：")
@@ -202,9 +163,8 @@ def render_sections(cfg, best=None):
             if nxt:
                 gap = nxt["level"] - abs(dd["dd"])
                 L.append(f"  下一档 -{nxt['level']}%（还差 {gap:.2f} 个点）→ {nxt['amount']}元（{nxt['source']}）")
-        L.append("  联动：止盈资金 → 入待命金；回撤触发 → 从池中出钱加仓（人工执行）")
     except Exception as e:
-        L += ["", "【择时信号】数据获取失败：%s: %s" % (type(e).__name__, str(e)[:80])]
+        L += ["", "【回撤加仓】数据获取失败：%s: %s" % (type(e).__name__, str(e)[:80])]
 
     if dirty:
         state["last_update"] = datetime.datetime.now().isoformat(timespec="seconds")
