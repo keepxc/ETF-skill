@@ -23,6 +23,7 @@ UA         = "Mozilla/5.0"   # Yahoo 对完整浏览器 UA 会走 429 限流通�
 
 # 默认参数（可被 dca_config.json["signals"] 覆盖）
 DEFAULTS = {
+    "show_levels": False,            # False = 只输出 QQQ 回撤一行；True = 恢复完整档位/加仓池
     "monthly_inject": 1000,          # 每月注入加仓池的金额
     "drawdown_levels": [
         {"level": 8,  "amount": 300, "source": "加仓池"},
@@ -144,44 +145,49 @@ def render_sections(cfg, best=None):
         closes = fetch_qqq_closes("2y")
         dd = drawdown(closes)
 
-        if inject_monthly(state, sig_cfg):
-            dirty = True
         levels = sig_cfg["drawdown_levels"]
-        if reset_if_recovered(dd["dd"], state, levels):
-            dirty = True
-
         pool = state.get("pool_balance", 0)
-        L += ["", "=" * 48, "  📉 回撤加仓档位（加仓池）", "=" * 48]
+        show_levels = bool(sig_cfg.get("show_levels", False))
+        if show_levels:
+            if inject_monthly(state, sig_cfg):
+                dirty = True
+            if reset_if_recovered(dd["dd"], state, levels):
+                dirty = True
+            pool = state.get("pool_balance", 0)
+
+        L += ["", "=" * 48, "  📉 纳指回撤（QQQ）", "=" * 48]
         L.append(f"  QQQ {dd['current']:.2f}｜自 52 周高点 {dd['high']:.2f} 回撤 {dd['dd']:+.2f}%"
                  f"（高点 {dd['days_since_high']} 个交易日前）")
-        for lv in levels:
-            used = lv["level"] in state.get("triggered_levels", [])
-            hit = dd["dd"] <= -lv["level"]
-            mark = " ✅已用" if used else (" 🔔触发" if hit else "")
-            L.append(f"  -{lv['level']}% [{_bar(abs(dd['dd']) / lv['level'] * 100)}] {lv['amount']}元{mark}")
-        L.append(f"  💰 加仓池 {pool} 元（每月注入 {sig_cfg.get('monthly_inject', 0)} 元）")
 
-        trig = check_triggers(dd["dd"], state, levels)
-        if trig:
-            L.append("  🚨 档位触发（与月度定投是两笔钱）：")
-            for t in trig:
-                tgt = f"{best['code']} {best['name']}（当前溢价 {best['prem']:+.2f}%）" if best else "决策池最优标的"
-                if pool >= t["amount"]:
-                    state["pool_balance"] = pool - t["amount"]
-                    pool -= t["amount"]
-                    note = f"，池余 {pool} 元"
-                else:
-                    note = "（池内余额不足，需另行出资）"
-                L.append(f"    ⚡ 跌 {t['level']}% → 买入 {t['amount']} 元 {tgt}{note}")
-                state.setdefault("triggered_levels", []).append(t["level"])
-            if best and best["prem"] >= 10:
-                L.append("    注意：当前溢价偏高，加仓成本里含这块溢价")
-            dirty = True
-        else:
-            nxt = next((lv for lv in levels if dd["dd"] > -lv["level"]), None)
-            if nxt:
-                gap = nxt["level"] - abs(dd["dd"])
-                L.append(f"  下一档 -{nxt['level']}%（还差 {gap:.2f} 个点）→ {nxt['amount']}元")
+        if show_levels:
+            for lv in levels:
+                used = lv["level"] in state.get("triggered_levels", [])
+                hit = dd["dd"] <= -lv["level"]
+                mark = " ✅已用" if used else (" 🔔触发" if hit else "")
+                L.append(f"  -{lv['level']}% [{_bar(abs(dd['dd']) / lv['level'] * 100)}] {lv['amount']}元{mark}")
+            L.append(f"  💰 加仓池 {pool} 元（每月注入 {sig_cfg.get('monthly_inject', 0)} 元）")
+
+            trig = check_triggers(dd["dd"], state, levels)
+            if trig:
+                L.append("  🚨 档位触发（与月度定投是两笔钱）：")
+                for t in trig:
+                    tgt = f"{best['code']} {best['name']}（当前溢价 {best['prem']:+.2f}%）" if best else "决策池最优标的"
+                    if pool >= t["amount"]:
+                        state["pool_balance"] = pool - t["amount"]
+                        pool -= t["amount"]
+                        note = f"，池余 {pool} 元"
+                    else:
+                        note = "（池内余额不足，需另行出资）"
+                    L.append(f"    ⚡ 跌 {t['level']}% → 买入 {t['amount']} 元 {tgt}{note}")
+                    state.setdefault("triggered_levels", []).append(t["level"])
+                if best and best["prem"] >= 10:
+                    L.append("    注意：当前溢价偏高，加仓成本里含这块溢价")
+                dirty = True
+            else:
+                nxt = next((lv for lv in levels if dd["dd"] > -lv["level"]), None)
+                if nxt:
+                    gap = nxt["level"] - abs(dd["dd"])
+                    L.append(f"  下一档 -{nxt['level']}%（还差 {gap:.2f} 个点）→ {nxt['amount']}元")
     except Exception as e:
         L += ["", "【回撤加仓】数据获取失败：%s: %s" % (type(e).__name__, str(e)[:80])]
 
