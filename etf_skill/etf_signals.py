@@ -1,19 +1,17 @@
-"""回撤加仓档位（资金池）—— 自 legacy/etf_monitor/nasdaq_drawdown.py 恢复
+"""回撤加仓档位（加仓池）—— 自 legacy/etf_monitor/nasdaq_drawdown.py 恢复
 
-定位（与月度定投是两笔独立的钱）
+定位
 ----
   · 月度定投 = 每月 1000 基准、按溢价档位定额（不拆分），走 etf_daily.plan_amount
-  · 回撤加仓 = 从资金池出钱；资金池**没有月度充值**（月投不拆分），
-               来源为人工注入；本模块只做提示 + 去重，不自动交易
+  · 回撤加仓 = 从「加仓池」出钱：**每月注入 1000**（可配），跌到档位时按金额扣减
+  · 本模块只做提示 + 记账（去重、余额不足提示），不自动交易
 数据源：Yahoo Finance QQQ 日线（必须走 7890 代理）。
 参数集中在 dca_config.json 的 "signals" 块，本文件只留默认值兜底。
 
 历史说明
 ----
 原一并恢复的「QQQ vs MA200 止盈信号」已于 2026-10-03 移除：
-用 QQQ 1999-2026 全历史验证后不成立（>20% 止盈的劣势完全由 2000-2002 泡沫期定义，
-2020-2026 反而好于基准；事件化后"上穿 20%"其后 12 个月 9/9 全部上涨；
-"跌破 MA200 = 熊市"同样不成立）。完整数据见 docs/qqq-ma200-validation.md。
+用 QQQ 1999-2026 全历史验证后不成立（见 docs/qqq-ma200-validation.md）。
 """
 import json, time, datetime, urllib.request
 from pathlib import Path
@@ -23,20 +21,19 @@ ALLOC_PATH = HERE / "alloc_state.json"
 PROXY      = "http://127.0.0.1:7890"
 UA         = "Mozilla/5.0"   # Yahoo 对完整浏览器 UA 会走 429 限流通道，短 UA 才通
 
-# 与 legacy 一致的默认参数（可被 dca_config.json["signals"] 覆盖）
+# 默认参数（可被 dca_config.json["signals"] 覆盖）
 DEFAULTS = {
+    "monthly_inject": 1000,          # 每月注入加仓池的金额
     "drawdown_levels": [
-        {"level": 8,  "amount": 300, "source": "待命金"},
-        {"level": 15, "amount": 500, "source": "待命金"},
-        {"level": 22, "amount": 500, "source": "待命金+风暴金"},
-        {"level": 30, "amount": 500, "source": "风暴金"},
-        {"level": 40, "amount": 500, "source": "风暴金"},
+        {"level": 8,  "amount": 300, "source": "加仓池"},
+        {"level": 15, "amount": 500, "source": "加仓池"},
+        {"level": 22, "amount": 500, "source": "加仓池"},
+        {"level": 30, "amount": 500, "source": "加仓池"},
+        {"level": 40, "amount": 500, "source": "加仓池"},
     ],
 }
 
-# 资金池初始值 = 0：**不沿用 legacy 的 300/100** —— 那是旧体系从月投里拆出来的钱，
-# 新体系月投 1000 不拆分，池子只能靠人工注入，未注入时保持 0。
-INIT_STATE = {"reserve_balance": 0, "storm_balance": 0, "triggered_levels": []}
+INIT_STATE = {"pool_balance": 0, "triggered_levels": []}
 
 
 def _load(path, default):
@@ -50,14 +47,21 @@ def _save(path, obj):
     Path(path).write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_state():
+    """读状态；兼容旧的 reserve/storm 两分池结构（合并为 pool_balance）"""
+    st = _load(ALLOC_PATH, None)
+    if not isinstance(st, dict):
+        return dict(INIT_STATE, triggered_levels=[])
+    if "pool_balance" not in st:
+        st["pool_balance"] = st.get("reserve_balance", 0) + st.get("storm_balance", 0)
+    st.setdefault("triggered_levels", [])
+    return st
+
+
 def cfg_signals(cfg):
     s = json.loads(json.dumps(DEFAULTS))
-    user = (cfg or {}).get("signals") or {}
-    for k, v in user.items():
-        if isinstance(v, dict) and isinstance(s.get(k), dict):
-            s[k].update(v)
-        else:
-            s[k] = v
+    for k, v in ((cfg or {}).get("signals") or {}).items():
+        s[k] = v
     return s
 
 
@@ -96,6 +100,17 @@ def drawdown(closes, lookback=252):
             "days_since_high": len(w) - 1 - w.index(high)}
 
 
+def inject_monthly(state, cfg):
+    """每月注入加仓池（幂等）"""
+    amount = cfg.get("monthly_inject") or 0
+    month = datetime.date.today().strftime("%Y-%m")
+    if not amount or state.get("last_inject_month") == month:
+        return False
+    state["pool_balance"] = state.get("pool_balance", 0) + amount
+    state["last_inject_month"] = month
+    return True
+
+
 def check_triggers(dd_pct, state, levels):
     already = set(state.get("triggered_levels", []))
     return [lv for lv in levels if dd_pct <= -lv["level"] and lv["level"] not in already]
@@ -122,40 +137,42 @@ def _bar(pct, width=15):
 def render_sections(cfg, best=None):
     """返回日报用的一节文本（list[str]）。数据源失败只影响本节。"""
     sig_cfg = cfg_signals(cfg)
-    state = _load(ALLOC_PATH, {"reserve_balance": INIT_STATE["reserve_balance"],
-                              "storm_balance": INIT_STATE["storm_balance"],
-                              "triggered_levels": []})
+    state = load_state()
     L, dirty = [], False
 
     try:
         closes = fetch_qqq_closes("2y")
         dd = drawdown(closes)
 
+        if inject_monthly(state, sig_cfg):
+            dirty = True
         levels = sig_cfg["drawdown_levels"]
         if reset_if_recovered(dd["dd"], state, levels):
             dirty = True
 
-        L += ["", "=" * 48, "  📉 回撤加仓档位（资金池）", "=" * 48]
+        pool = state.get("pool_balance", 0)
+        L += ["", "=" * 48, "  📉 回撤加仓档位（加仓池）", "=" * 48]
         L.append(f"  QQQ {dd['current']:.2f}｜自 52 周高点 {dd['high']:.2f} 回撤 {dd['dd']:+.2f}%"
                  f"（高点 {dd['days_since_high']} 个交易日前）")
         for lv in levels:
             used = lv["level"] in state.get("triggered_levels", [])
             hit = dd["dd"] <= -lv["level"]
             mark = " ✅已用" if used else (" 🔔触发" if hit else "")
-            L.append(f"  -{lv['level']}% [{_bar(abs(dd['dd']) / lv['level'] * 100)}] "
-                     f"{lv['amount']}元（{lv['source']}）{mark}")
-        total_pool = state.get("reserve_balance", 0) + state.get("storm_balance", 0)
-        L.append(f"  💰 待命金 {state.get('reserve_balance', 0)} 元 | "
-                 f"风暴金 {state.get('storm_balance', 0)} 元 | 合计 {total_pool} 元")
-        L.append("  （未注入则保持 0：新体系月投 1000 不拆分，池子靠人工注入维护）")
+            L.append(f"  -{lv['level']}% [{_bar(abs(dd['dd']) / lv['level'] * 100)}] {lv['amount']}元{mark}")
+        L.append(f"  💰 加仓池 {pool} 元（每月注入 {sig_cfg.get('monthly_inject', 0)} 元）")
 
         trig = check_triggers(dd["dd"], state, levels)
         if trig:
             L.append("  🚨 档位触发（与月度定投是两笔钱）：")
             for t in trig:
                 tgt = f"{best['code']} {best['name']}（当前溢价 {best['prem']:+.2f}%）" if best else "决策池最优标的"
-                short = "（池内余额不足，需自行出资）" if total_pool < t["amount"] else ""
-                L.append(f"    ⚡ 跌 {t['level']}% → 从{t['source']}转 {t['amount']} 元，买入 {tgt}{short}")
+                if pool >= t["amount"]:
+                    state["pool_balance"] = pool - t["amount"]
+                    pool -= t["amount"]
+                    note = f"，池余 {pool} 元"
+                else:
+                    note = "（池内余额不足，需另行出资）"
+                L.append(f"    ⚡ 跌 {t['level']}% → 买入 {t['amount']} 元 {tgt}{note}")
                 state.setdefault("triggered_levels", []).append(t["level"])
             if best and best["prem"] >= 10:
                 L.append("    注意：当前溢价偏高，加仓成本里含这块溢价")
@@ -164,7 +181,7 @@ def render_sections(cfg, best=None):
             nxt = next((lv for lv in levels if dd["dd"] > -lv["level"]), None)
             if nxt:
                 gap = nxt["level"] - abs(dd["dd"])
-                L.append(f"  下一档 -{nxt['level']}%（还差 {gap:.2f} 个点）→ {nxt['amount']}元（{nxt['source']}）")
+                L.append(f"  下一档 -{nxt['level']}%（还差 {gap:.2f} 个点）→ {nxt['amount']}元")
     except Exception as e:
         L += ["", "【回撤加仓】数据获取失败：%s: %s" % (type(e).__name__, str(e)[:80])]
 

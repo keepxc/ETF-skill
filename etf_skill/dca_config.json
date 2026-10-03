@@ -21,12 +21,13 @@
   },
   "fee_refresh_days": 7,
   "signals": {
+    "monthly_inject": 1000,
     "drawdown_levels": [
-      {"level": 8,  "amount": 300, "source": "待命金"},
-      {"level": 15, "amount": 500, "source": "待命金"},
-      {"level": 22, "amount": 500, "source": "待命金+风暴金"},
-      {"level": 30, "amount": 500, "source": "风暴金"},
-      {"level": 40, "amount": 500, "source": "风暴金"}
+      {"level": 8,  "amount": 300, "source": "加仓池"},
+      {"level": 15, "amount": 500, "source": "加仓池"},
+      {"level": 22, "amount": 500, "source": "加仓池"},
+      {"level": 30, "amount": 500, "source": "加仓池"},
+      {"level": 40, "amount": 500, "source": "加仓池"}
     ]
   }
 }
