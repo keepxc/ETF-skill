@@ -1,7 +1,9 @@
-# ETF 监控脚本（513300 纳指 ETF 定投）
+# ETF 监控脚本（纳指 100 场内 ETF 定投）
 
-A 股场内 **513300 纳斯达克ETF华夏** 的定投监控与每日/每周简报工具集。
-由本机 Hermes cronjob 驱动，输出推送到 Telegram 并写 Obsidian 存档。
+纳指 100 场内 ETF 的**多标的比价 + 溢价档位定投**监控，附每日 / 每周简报。
+由本机 Hermes cronjob 驱动，输出推送到 Telegram。
+
+> 决策池与档位见 `etf_skill/dca_config.json`（现为 513390 / 513870 / 159660；早期版本只做单标的 513300，见 `legacy/`）。
 
 > ⚠️ 本仓库的**文件就位于生产路径** `/home/gyan/scripts/`，不是拷贝。
 > 修改后 git 会跟踪；cron 直接跑的就是这里的文件。
@@ -42,25 +44,22 @@ bash ~/.hermes/scripts/etf_weekly.sh     # 深度周报
 | `dca_state.json` | 运行时生成（不入库）：积压资金、上次定投月份、定投记录 |
 | `fee_cache.json` | 运行时生成（不入库）：东财费率页抓取缓存，每 7 天刷新，检测到费率变动会提示 |
 | `etf_weekly.py` | **周报**。NDX PE / 收益拆解 / 滚动 5 年 / VXN / 回撤 / Mag7 AI 估值 六维全景 |
-| `etf_check.py` | 旧版综合简报（早期版本，保留参考） |
-| —— 见根目录 `etf_check.py` | **V1.3 巡检版**（2026-05，数据源：新浪 K 线/东财净值/蛋卷 PE/Yahoo QQQ+VIX，含子弹余额逻辑）。远端仓库遗留文件，保留未删 |
-| `calc_premium_history.py` | 拉全量 K 线 + 历史净值，算历史溢率分布 → `history_premium.csv` |
+| `calc_premium_history.py` | 一次性工具：拉 513300 全量 K 线 + 历史净值，重算溢率分布 → `history_premium.csv`（非日常生产依赖） |
 | `history_premium.csv` | 513300 历史溢率序列（2023-04 起，约 1400 行：date, close, nav, premium_pct） |
-| `etf_state.json` | 溢价/暂停状态（`high_premium_date` / `sold` / `paused`） |
 
-### `etf_monitor/` — 早期定投策略实验（模块化）
+### `legacy/` — 已停用的早期实现（仅追溯，勿引用）
 
-分仓加仓 + 溢价控制 + 回撤档位的完整策略实现，后来精简成 `etf_skill/etf_daily.py`。
+现行实现只有 `etf_skill/` 一套（日报 + 周报：多标的比价 + 溢价档位）。legacy 里的东西**全部已被取代，不再被任何 cron/脚本引用**：
 
-| 文件 | 说明 |
-|------|------|
-| `etf513300.py` | 数据工具：实时价 / K 线 / MA（httpx） |
-| `nasdaq_dca.py` | 定投策略：溢价阈值（>3% 不买）、月投额、加仓判定 |
-| `nasdaq_drawdown.py` | 回撤追踪 + 分仓档位（-8%/-15%/-22%/-30%/-40%，待命金/风暴金） |
-| `dca_brief.py` | 定投早盘简报（含回撤追踪 + 分仓加仓） |
-| `daily_brief.py` / `close_report.py` | 早盘简报 / 收盘报告 |
-| `send_via_hermes.py` | 通过 `hermes send_message` 推 Telegram |
-| `nasdaq_state.json` | 待命金/风暴金余额与已触发档位 |
+| 文件 | 代际 | 与现行体系的关系 |
+|------|------|------------------|
+| `etf_check_v1.3_2026-05.py` | V1.3（2026-05） | 单标的 513300 巡检：新浪 K 线 / 东财净值 / 蛋卷 PE / Yahoo QQQ+VIX，含 QQQ MA200 止盈、回撤加仓档位、子弹余额（改常量维护）。**这些择时机制现行体系没有**——现用溢价档位 + 积压（`backlog`）替代 |
+| `etf_check_2026-06.py` | 过渡版（2026-06） | 单标的 + btcdca 评分 + historyofmarket；已被多标的日报取代 |
+| `etf_monitor/` | 实验版（2026-05） | 模块化分仓加仓 + 回撤档位（-8/-15/-22/-30/-40%，待命金/风暴金）+ 早盘/收盘简报 |
+| `run_dca_brief.sh`、`run_dca_brief.hermes-wrapper.sh` | 2026-05 | 指向 `etf_monitor/dca_brief.py` 的入口，目标脚本已停用 |
+| `etf_state.json` | 2026-06 | 单标的溢价状态（`high_premium_date`/`sold`/`paused`），当前无任何引用；现行状态文件是 `etf_skill/dca_state.json` |
+
+> 若以后要用回撤加仓 / QQQ MA200 择时，从这里或 git 历史取——它们**未接入现行日报/周报**。
 
 ### `docs/`
 
