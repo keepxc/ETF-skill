@@ -34,8 +34,9 @@ DEFAULTS = {
     ],
 }
 
-# 资金池初始值（沿用 legacy/etf_monitor/nasdaq_state.json 的余额；人工维护，无月度充值）
-INIT_STATE = {"reserve_balance": 300, "storm_balance": 100, "triggered_levels": []}
+# 资金池初始值 = 0：**不沿用 legacy 的 300/100** —— 那是旧体系从月投里拆出来的钱，
+# 新体系月投 1000 不拆分，池子只能靠人工注入，未注入时保持 0。
+INIT_STATE = {"reserve_balance": 0, "storm_balance": 0, "triggered_levels": []}
 
 
 def _load(path, default):
@@ -143,17 +144,18 @@ def render_sections(cfg, best=None):
             mark = " ✅已用" if used else (" 🔔触发" if hit else "")
             L.append(f"  -{lv['level']}% [{_bar(abs(dd['dd']) / lv['level'] * 100)}] "
                      f"{lv['amount']}元（{lv['source']}）{mark}")
+        total_pool = state.get("reserve_balance", 0) + state.get("storm_balance", 0)
         L.append(f"  💰 待命金 {state.get('reserve_balance', 0)} 元 | "
-                 f"风暴金 {state.get('storm_balance', 0)} 元 | "
-                 f"合计 {state.get('reserve_balance', 0) + state.get('storm_balance', 0)} 元")
-        L.append("  （资金池无月度充值，靠人工注入维护余额）")
+                 f"风暴金 {state.get('storm_balance', 0)} 元 | 合计 {total_pool} 元")
+        L.append("  （未注入则保持 0：新体系月投 1000 不拆分，池子靠人工注入维护）")
 
         trig = check_triggers(dd["dd"], state, levels)
         if trig:
             L.append("  🚨 档位触发（与月度定投是两笔钱）：")
             for t in trig:
                 tgt = f"{best['code']} {best['name']}（当前溢价 {best['prem']:+.2f}%）" if best else "决策池最优标的"
-                L.append(f"    ⚡ 跌 {t['level']}% → 从{t['source']}转 {t['amount']} 元，买入 {tgt}")
+                short = "（池内余额不足，需自行出资）" if total_pool < t["amount"] else ""
+                L.append(f"    ⚡ 跌 {t['level']}% → 从{t['source']}转 {t['amount']} 元，买入 {tgt}{short}")
                 state.setdefault("triggered_levels", []).append(t["level"])
             if best and best["prem"] >= 10:
                 L.append("    注意：当前溢价偏高，加仓成本里含这块溢价")
