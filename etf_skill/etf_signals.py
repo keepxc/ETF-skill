@@ -7,9 +7,9 @@
 
 定位（与月度定投是两笔独立的钱）
 ----
-  · 月度定投 = 溢价档位定额，走 etf_daily.plan_amount（本金按 dca_config 的 base/backlog）
-  · 回撤加仓 = 从资金池（待命金 / 风暴金）出钱，本模块只做提示 + 去重，不自动交易
-  · 止盈资金  → 入待命金（人工执行）
+  · 月度定投 = 每月 1000 基准、按溢价档位定额（不拆分），走 etf_daily.plan_amount
+  · 回撤加仓 = 从资金池出钱；资金池**没有月度充值**（月投不拆分），
+               来源是止盈回款 + 人工注入；本模块只做提示 + 去重，不自动交易
 数据源：Yahoo Finance QQQ 日线（必须走 7890 代理）+ 腾讯 usQQQ 实时价。
 参数集中在 dca_config.json 的 "signals" 块，本文件只留默认值兜底。
 """
@@ -31,8 +31,6 @@ DEFAULTS = {
         {"level": 30, "amount": 500, "source": "风暴金"},
         {"level": 40, "amount": 500, "source": "风暴金"},
     ],
-    "monthly_reserve": 150,
-    "monthly_storm": 50,
 }
 
 # 初始资金池（沿用 legacy/etf_monitor/nasdaq_state.json 的余额）
@@ -123,17 +121,6 @@ def drawdown(closes, lookback=252):
             "days_since_high": len(w) - 1 - w.index(high)}
 
 
-def topup(state, sig_cfg):
-    """每月充值待命金/风暴金（幂等）"""
-    month = datetime.date.today().strftime("%Y-%m")
-    if state.get("last_topup_month") == month:
-        return False
-    state["reserve_balance"] = state.get("reserve_balance", 0) + sig_cfg["monthly_reserve"]
-    state["storm_balance"]   = state.get("storm_balance", 0) + sig_cfg["monthly_storm"]
-    state["last_topup_month"] = month
-    return True
-
-
 def check_triggers(dd_pct, state, levels):
     already = set(state.get("triggered_levels", []))
     return [lv for lv in levels if dd_pct <= -lv["level"] and lv["level"] not in already]
@@ -186,8 +173,6 @@ def render_sections(cfg, best=None):
 
         # ── 回撤加仓档位 ──
         levels = sig_cfg["drawdown_levels"]
-        if topup(state, sig_cfg):
-            dirty = True
         if reset_if_recovered(dd["dd"], state, levels):
             dirty = True
         L += ["", "=" * 48, "  📉 回撤加仓档位（资金池）", "=" * 48]
@@ -201,6 +186,7 @@ def render_sections(cfg, best=None):
                  f"风暴金 {state.get('storm_balance', 0)} 元 | "
                  f"合计 {state.get('reserve_balance', 0) + state.get('storm_balance', 0)} 元")
 
+        L.append("  （资金池无月度充值：来源为止盈回款 + 人工注入，余额手工维护）")
         trig = check_triggers(dd["dd"], state, levels)
         if trig:
             L.append("  🚨 档位触发（与月度定投是两笔钱）：")

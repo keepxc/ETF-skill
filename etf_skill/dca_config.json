@@ -28,8 +28,6 @@
       {"level": 22, "amount": 500, "source": "待命金+风暴金"},
       {"level": 30, "amount": 500, "source": "风暴金"},
       {"level": 40, "amount": 500, "source": "风暴金"}
-    ],
-    "monthly_reserve": 150,
-    "monthly_storm": 50
+    ]
   }
 }
