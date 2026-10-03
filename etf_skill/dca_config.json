@@ -19,5 +19,17 @@
     "min_avg_turnover_yi": 1.0,
     "premium_gap_pct": 1.0
   },
-  "fee_refresh_days": 7
+  "fee_refresh_days": 7,
+  "signals": {
+    "qqq_ma200": {"trim_pct": 20.0, "warn_pct": 12.0, "range": "2y"},
+    "drawdown_levels": [
+      {"level": 8,  "amount": 300, "source": "待命金"},
+      {"level": 15, "amount": 500, "source": "待命金"},
+      {"level": 22, "amount": 500, "source": "待命金+风暴金"},
+      {"level": 30, "amount": 500, "source": "风暴金"},
+      {"level": 40, "amount": 500, "source": "风暴金"}
+    ],
+    "monthly_reserve": 150,
+    "monthly_storm": 50
+  }
 }

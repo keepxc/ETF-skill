@@ -8,6 +8,8 @@ QDII 净值按美股收盘计价，A 股 T 日收盘时可知的最新美股信�
 import sys, json, re, datetime, urllib.request
 from pathlib import Path
 
+import etf_signals
+
 HERE        = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "dca_config.json"
 STATE_PATH  = HERE / "dca_state.json"
@@ -358,6 +360,9 @@ def main():
                 "date": today.isoformat(), "code": best["code"], "premium": round(best["prem"], 2),
                 "tier": tier["label"], "amount": amount, "backlog_after": new_backlog})
             _save(STATE_PATH, state)
+
+    # 纳指择时信号：QQQ MA200 止盈 + 回撤加仓档位（独立于上面的月度定投）
+    L += etf_signals.render_sections(cfg, best)
 
     L += ["=" * 48, ""]
     print("\n".join(L))

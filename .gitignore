@@ -12,3 +12,4 @@ __pycache__/
 etf_skill/dca_state.json
 etf_skill/fee_cache.json
 etf_skill/premium_log.json
+etf_skill/alloc_state.json

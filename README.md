@@ -44,6 +44,8 @@ bash ~/.hermes/scripts/etf_weekly.sh     # 深度周报
 | `dca_state.json` | 运行时生成（不入库）：积压资金、上次定投月份、定投记录 |
 | `fee_cache.json` | 运行时生成（不入库）：东财费率页抓取缓存，每 7 天刷新，检测到费率变动会提示 |
 | `etf_weekly.py` | **周报**。NDX PE / 收益拆解 / 滚动 5 年 / VXN / 回撤 / Mag7 AI 估值 六维全景 |
+| `etf_signals.py` | **择时信号**（自 legacy 恢复）：QQQ vs MA200 止盈信号 + 回撤加仓五档（资金池）。参数在 `dca_config.json` 的 `signals` 块 |
+| `alloc_state.json` | 运行时生成（不入库）：待命金 / 风暴金余额、已触发档位、上次充值月 |
 | `calc_premium_history.py` | 一次性工具：拉 513300 全量 K 线 + 历史净值，重算溢率分布 → `history_premium.csv`（非日常生产依赖） |
 | `history_premium.csv` | 513300 历史溢率序列（2023-04 起，约 1400 行：date, close, nav, premium_pct） |
 
@@ -71,6 +73,19 @@ bash ~/.hermes/scripts/etf_weekly.sh     # 深度周报
 
 ---
 
+## 择时信号（与月度定投是两笔钱）
+
+`etf_daily.py` 末尾输出两节择时信号（模块 `etf_signals.py`，2026-10 自 `legacy/` 恢复）：
+
+1. **纳指止盈信号（QQQ vs MA200）** — 数据源 Yahoo Finance QQQ 日线（必须走 7890 代理；**短 UA**，完整浏览器 UA 会被 429）。乖离 `(QQQ − MA200) / MA200` 分档：`>20%` 🔴 考虑止盈波段仓、`>12%` 🟡 偏高持有观望、`>0` 🟢 正常、`≤0` 🔵 低于 MA200（熊市信号）。止盈回款 → 待命金。
+2. **回撤加仓档位（资金池）** — 按 QQQ 自 52 周高点的回撤给档位：`-8% → 300`、`-15% → 500`、`-22% → 500`、`-30% → 500`、`-40% → 500`，从待命金 / 风暴金出钱。资金池每月充值「待命金 150 + 风暴金 50」（幂等，按月份）；同一档位触发一次后记 `✅已用`，回撤修复到 `-8%` 以内自动清空、视为新一轮（这条重置逻辑是恢复时补的，原版没有）。
+
+参数全在 `dca_config.json` 的 `signals` 块（改参数不用动代码）。**两条信号不替代月度定投**：定投按溢价档位定额，加仓从资金池出钱，是两笔独立的钱。
+
+> ⚠️ 已知张力：QDII 溢价常在下跌中扩大，所以「回撤触发加仓」与「溢价高 → 减半/暂停」会同时出现。当前只提示溢价偏高，不加硬约束。
+
+---
+
 ## 数据源
 
 | 来源 | 用途 |
@@ -80,6 +95,8 @@ bash ~/.hermes/scripts/etf_weekly.sh     # 深度周报
 | `api.fund.eastmoney.com/f10/lsjz` | 基金官方净值（需带 Referer/UA） |
 | `fundf10.eastmoney.com/jjfl_{code}.html` | 管理费 + 托管费（日报每 7 天刷新） |
 | `www.btcdca.me/nasdaq/api/score` | btcdca 定投评分（0-100，越高越贵；日报已不再使用） |
+| `query1.finance.yahoo.com/v8/finance/chart/QQQ` | QQQ 日线（择时信号用；必须走代理 + 短 UA） |
+| `qt.gtimg.cn/q=usQQQ` | QQQ 实时价（择时信号用） |
 | `historyofmarket.com/api/ndx/*` | NDX 前瞻 PE、收益拆解、滚动 5 年、VXN、回撤 |
 | `www.marketgrep.com/api/summary` | VIX / RSI / 市场情绪 / 湍流 |
 
