@@ -13,3 +13,7 @@ etf_skill/dca_state.json
 etf_skill/fee_cache.json
 etf_skill/premium_log.json
 etf_skill/alloc_state.json
+
+# 个人定投参数与运行期数据 —— 本仓库公开，不入库（磁盘保留，脚本照常读）
+etf_skill/dca_config.json
+etf_skill/history_premium.csv

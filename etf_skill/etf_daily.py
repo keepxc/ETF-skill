@@ -345,8 +345,8 @@ def main():
         head = "今日定投" if dca_now else f"按当前溢价预估（下次定投：{next_dca_label(today, cfg['dca_day'], state)}）"
         L.append(f"  ★ {head}：{amount} 元（{tier['label']}）")
         if amount > 0:
-            L.append(f"  ★ 标的：{best['code']} {best['name']}（溢价 {best['prem']:+.2f}%，决策池最低）")
-        L.append(f"  ★ 依据：溢价 {best['prem']:.2f}%（{best['price_date']} 价 ÷ {best['nav_date']} 净值）")
+            L.append(f"  ★ 标的：513390 纳指100ETF博时（当前持有，月投 1000 元）")
+        L.append(f"  ★ 依据：长期定投下溢价会被均值抹平，按每月 1000 元固定定投")
         cm = commission(amount, cfg)
         if amount > 0:
             L.append(f"  ★ 预估佣金 {cm:.2f} 元（占 {cm / amount * 100:.2f}%）")
