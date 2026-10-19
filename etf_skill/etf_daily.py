@@ -5,7 +5,7 @@ QDII 净值按美股收盘计价，A 股 T 日收盘时可知的最新美股信�
 故 T 日价格应与 T-1 净值配对（与券商 App / 腾讯行情显示的溢价率同口径）。
 该净值未公布时退用更早净值，并标注滞后交易日数。
 """
-import sys, json, re, datetime, urllib.request
+import sys, json, re, time, datetime, urllib.request
 from pathlib import Path
 
 import etf_signals
@@ -15,6 +15,10 @@ CONFIG_PATH = HERE / "dca_config.json"
 STATE_PATH  = HERE / "dca_state.json"
 FEE_CACHE   = HERE / "fee_cache.json"
 PREM_LOG    = HERE / "premium_log.json"
+POS_PATH    = HERE / "position.json"
+RUN_STATE   = HERE / "run_state.json"
+
+ANN_URL     = "https://api.fund.eastmoney.com/f10/JJGG?fundcode={c}&pageIndex=1&pageSize=10&type=0"
 
 WEEKDAY_CN  = ["周一","周二","周三","周四","周五","周六","周日"]
 NDX_PE_URL  = "https://historyofmarket.com/api/ndx/forward-pe.json"
@@ -61,6 +65,7 @@ def fetch_quotes(codes):
                 "name": f[1],
                 "price": float(f[3]) if f[3] else None,
                 "prev_close": float(f[4]) if f[4] else None,
+                "vol": float(f[6]) if f[6] else 0.0,
                 "ts": datetime.datetime.strptime(f[30], "%Y%m%d%H%M%S"),
             }
         except (ValueError, IndexError):
@@ -124,6 +129,36 @@ def fetch_ndx_pe():
         return None
 
 
+def fetch_ndx_closes(n=15):
+    """纳指100 已完成交易日的收盘序列（腾讯美股K线），用于把滞后净值折算到最新美股收盘日。
+    只取已收盘的日线，避免把盘中未完成的美国交易日混进与 A 股收盘价的比对。"""
+    end = datetime.date.today()
+    today = end.isoformat()
+    start = end - datetime.timedelta(days=n * 2 + 10)
+    u = ("https://web.ifzq.gtimg.cn/appstock/app/usfqkline/get?"
+         f"param=usNDX,day,{start},{end},{n * 2 + 10},qfq")
+    for _ in range(3):
+        try:
+            d = json.loads(_get(u, timeout=10))["data"]["usNDX"]
+            rows = d.get("day") or d.get("qfqday") or []
+            # 剔除当日（美股 21:30 后才开盘，当日报价是未完成的盘中bar）
+            return {r[0]: float(r[2]) for r in rows if r[0] < today}
+        except Exception:
+            time.sleep(1)
+    return {}
+
+
+def correct_nav(nav_date, nav, ndx):
+    """按纳指涨跌把滞后净值折算到最新美股收盘日。返回 (est_nav, ref_date)"""
+    if not ndx or not nav_date or nav_date not in ndx:
+        return None, None
+    ref = max(ndx)
+    base = ndx[nav_date]
+    if not base:
+        return None, None
+    return nav * (ndx[ref] / base), ref
+
+
 def fetch_marketgrep():
     try:
         d = json.loads(_get(MKG_URL))
@@ -142,6 +177,29 @@ def fetch_marketgrep():
     return " | ".join(parts)
 
 
+# ── 开盘时点判定（不写死时间：按当日公告 + 实际成交判断） ──────
+
+def halt_notice_today(codes, today):
+    """今日是否有开市临停公告。公告在前一交易日晚间 18:30 发布，开盘前即可判读。
+    返回摘要字符串或 None"""
+    ds = today.isoformat()
+    for c in codes:
+        try:
+            d = json.loads(_get(ANN_URL.format(c=c), referer="https://fund.eastmoney.com/", timeout=10))
+        except Exception:
+            continue
+        for it in (d.get("Data") or []):
+            t = it.get("TITLE") or ""
+            if str(it.get("PUBLISHDATEDesc") or "")[:10] == ds and any(k in t for k in ("停牌", "停复牌")):
+                return f"{c} 临停公告"
+    return None
+
+
+def traded_today(q, today):
+    """今日是否已有成交（临停期间成交量为 0）"""
+    return bool(q) and q["ts"].date() == today and (q.get("vol") or 0) > 0
+
+
 # ── 溢价计算 ──────────────────────────────────────────────
 
 def price_basis(q, cal, now):
@@ -149,6 +207,8 @@ def price_basis(q, cal, now):
     盘中(≥09:30)用实时价；集合竞价/盘前用昨收；休市用最近收盘。"""
     ts = q["ts"]
     if ts.date() == now.date():
+        if now.time() > datetime.time(15, 0):
+            return q["price"], now.date().isoformat(), "收盘"
         if ts.time() >= datetime.time(9, 30):
             return q["price"], now.date().isoformat(), "实时"
         prev = [d for d in cal if d < now.date().isoformat()]
@@ -224,6 +284,53 @@ def next_dca_label(today, dca_day, state):
     return f"{m}月{dca_day}日（遇休市顺延）"
 
 
+# ── 持仓敞口 ──────────────────────────────────────────────
+
+def render_position(rows):
+    """持仓真实敞口：市值 / 浮盈亏 / NAV资产与溢价空气拆分 / 触发线"""
+    pos = _load(POS_PATH, None)
+    if not pos or not pos.get("positions"):
+        return []
+    tg = pos.get("trigger", {})
+    L = ["", "=" * 48, "  📦 持仓敞口", "=" * 48]
+    for p in pos["positions"]:
+        r = rows.get(p["code"])
+        if not r or r.get("price") is None or r.get("prem") is None:
+            L.append(f"  {p['code']} 数据缺失")
+            continue
+        px = r["price"]
+        nav = r.get("nav_est") or r["nav"]
+        prem = r["prem_est"] if r.get("prem_est") is not None else r["prem"]
+        sh, cost = p["shares"], p["cost"]
+        total, mv = sh * cost, sh * px
+        navval = sh * nav
+        air = mv - navval
+        L.append(f"  {p['code']} {r['name']}  {sh} 股 @ {cost:.4f}")
+        L.append(f"    现价 {px:.3f}  市值 {mv:,.0f}  盈亏 {mv - total:+,.0f}（{(mv - total) / total * 100:+.2f}%）")
+        L.append(f"    NAV资产 {navval:,.0f} + 溢价空气 {air:,.0f}（占市值 {air / mv * 100:.1f}%）")
+        L.append(f"    当前溢价 {prem:+.2f}%")
+        L.append(f"    回本需价格 {cost:.4f}（{(cost / px - 1) * 100:+.2f}%），对应溢价 {(cost / nav - 1) * 100:+.2f}%")
+        a, w = tg.get("add_below_prem"), tg.get("watch_above_prem")
+        if a is not None:
+            pa = nav * (1 + a / 100)
+            L.append(f"    加仓线 溢价<{a:.0f}% → 价格 {pa:.3f}（还需 {(pa / px - 1) * 100:+.1f}%）")
+        if w is not None and prem >= w:
+            L.append(f"    ⚠ 溢价 {prem:.2f}% 已触及警戒线 {w:.0f}%")
+    L.append(f"  依据：{best_note(rows, pos)}")
+    return L
+
+
+def best_note(rows, pos):
+    c = pos["positions"][0]["code"] if pos.get("positions") else ""
+    r = rows.get(c, {})
+    if r.get("nav_est"):
+        return (f"溢价用纳指修正口径（官方净值 {r['nav_date']} {r['nav']:.4f} 滞后 {r.get('lag', 0)} 日，"
+                f"已按纳指折算至 {r['est_ref']}；官方口径 {r['prem']:+.2f}%）")
+    if r.get("price_date") and r.get("nav_date"):
+        return f"市价 {r['price_date']} ÷ 净值 {r['nav_date']}，净值滞后 {r.get('lag', 0)} 个交易日"
+    return "净值口径见上方【溢价口径】"
+
+
 # ── 主流程 ────────────────────────────────────────────────
 
 def main():
@@ -236,12 +343,48 @@ def main():
     today = now.date()
     pool, watch = cfg["pool"], cfg["watch"]
     errors = []
+    rstate = _load(RUN_STATE, {})
 
-    try:
-        quotes = fetch_quotes(pool + watch)
-    except Exception as e:
-        quotes = {}
-        errors.append(f"行情({type(e).__name__})")
+    # 今日已推送 → 静默退出（供 10:32 兜底任务去重）
+    if rstate.get("sent") == today.isoformat():
+        return
+
+    def defer(reason):
+        _save(RUN_STATE, {**rstate, "defer": today.isoformat(), "defer_reason": reason})
+
+    # ① 未开盘
+    if now.time() < datetime.time(9, 30):
+        defer("未到开盘")
+        return
+
+    # ② 当日开市临停公告（前一交易日晚间 18:30 发布，开盘前已可知）
+    halt = halt_notice_today(pool[:1], today)
+    if halt and now.time() < datetime.time(10, 31):
+        defer(f"{halt}，开市停牌至 10:30")
+        return
+
+    # ③ 取行情：未停牌时等开盘首笔成交（最多 120 秒，最迟 09:33 收工）
+    quotes, qerr = {}, None
+    deadline = time.time() + 120
+    while True:
+        try:
+            quotes = fetch_quotes(pool + watch)
+            qerr = None
+        except Exception as e:
+            qerr = f"行情({type(e).__name__})"
+        if halt or traded_today(quotes.get(pool[0]), today):
+            break
+        if datetime.datetime.now().time() >= datetime.time(9, 33) or time.time() >= deadline:
+            break
+        time.sleep(10)
+    if qerr:
+        errors.append(qerr)
+
+    # ④ 无公告却开盘无成交 → 按临停处理，等复牌后再报
+    if (not halt and not traded_today(quotes.get(pool[0]), today)
+            and datetime.time(9, 32) <= now.time() < datetime.time(10, 31)):
+        defer("开盘无成交（疑似临停）")
+        return
 
     cal = []
     try:
@@ -253,6 +396,7 @@ def main():
     if fee_failed:
         errors.append("费率:" + ",".join(fee_failed))
 
+    ndx = fetch_ndx_closes()
     rows = {}
     for c in pool + watch:
         q = quotes.get(c)
@@ -274,6 +418,10 @@ def main():
             pr = None
         if pr:
             r.update(pr)
+            est, ref = correct_nav(pr["nav_date"], pr["nav"], ndx)
+            if est and ref != pr["nav_date"]:
+                r["nav_est"], r["est_ref"] = est, ref
+                r["prem_est"] = (price / est - 1) * 100
         else:
             errors.append(f"{c}净值")
         rows[c] = r
@@ -287,6 +435,8 @@ def main():
     L = ["", "=" * 48, "  📊 纳指 100 场内 ETF 定投日报",
          f"  📅 {now:%m-%d %H:%M}（{WEEKDAY_CN[today.weekday()]}{'' if trading_today else ' · 休市'}）",
          "=" * 48]
+    if rstate.get("defer") == today.isoformat():
+        L.append(f"  ⏸ {rstate.get('defer_reason', '开盘延迟')} → 以下为复牌后实时价")
     if errors:
         L.append(f"  ⚠ 部分数据获取失败：{'、'.join(dict.fromkeys(errors))}")
 
@@ -298,13 +448,18 @@ def main():
             L.append(f"  {r['code']} {r['name']}  数据缺失")
             continue
         tag = "  ← 最低" if r is best else ""
-        L.append(f"  {r['code']} {r['name']}  价 {r['price']:.3f}  溢价 {r['prem']:+.2f}%  "
+        pce = f"（修正 {r['prem_est']:+.2f}%）" if r.get("prem_est") is not None else ""
+        L.append(f"  {r['code']} {r['name']}  价 {r['price']:.3f}  溢价 {r['prem']:+.2f}%{pce}  "
                  f"费率 {fee}  日均 {tv}{tag}")
 
     if best:
         L += ["", "【溢价口径】收盘价(T) ÷ 官方净值(T 前一交易日)",
               f"  {best['code']}：{best['price_label']} {best['price_date']} {best['price']:.3f}"
               f" ÷ 净值 {best['nav_date']} {best['nav']:.4f}"]
+        if best.get("nav_est"):
+            L.append(f"  {best['code']} 纳指修正：净值 {best['nav_date']} {best['nav']:.4f}"
+                     f" × 纳指至 {best['est_ref']} → {best['nav_est']:.4f}"
+                     f" → 溢价 {best['prem_est']:+.2f}%  ← 决策用这个")
         lagged = [r["code"] for r in pool_ok if r["lag"] > 0]
         if lagged:
             L.append(f"  ⚠ {','.join(lagged)} 净值滞后 {max(r['lag'] for r in pool_ok)} 个交易日，"
@@ -361,10 +516,14 @@ def main():
                 "tier": tier["label"], "amount": amount, "backlog_after": new_backlog})
             _save(STATE_PATH, state)
 
+    # 持仓真实敞口：市值 / 浮盈亏 / NAV资产与溢价空气拆分 / 触发线
+    L += render_position(rows)
+
     # 纳指择时信号：QQQ MA200 止盈 + 回撤加仓档位（独立于上面的月度定投）
     L += etf_signals.render_sections(cfg, best)
 
     L += ["=" * 48, ""]
+    _save(RUN_STATE, {**rstate, "sent": today.isoformat()})
     print("\n".join(L))
 
 
