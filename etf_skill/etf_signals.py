@@ -76,8 +76,23 @@ def _http(url, use_proxy=True, timeout=15):
         return r.read().decode("utf-8", errors="replace")
 
 
+def fetch_qqq_closes_tencent(days=520):
+    """兜底：腾讯美股 K 线（不走代理、无 429、无握手超时）。只取已完成交易日。"""
+    end = datetime.date.today()
+    start = end - datetime.timedelta(days=days)
+    url = ("https://web.ifzq.gtimg.cn/appstock/app/usfqkline/get?"
+           f"param=usQQQ,day,{start},{end},{days},qfq")
+    d = json.loads(_http(url, use_proxy=False))["data"]["usQQQ"]
+    rows = d.get("day") or d.get("qfqday") or []
+    iso = end.isoformat()
+    closes = [float(r[2]) for r in rows if r[0] < iso]
+    if not closes:
+        raise RuntimeError("腾讯 QQQ 返回空")
+    return closes
+
+
 def fetch_qqq_closes(rng="2y"):
-    """Yahoo QQQ 日线收盘序列。必须走代理（直连 403）；短 UA 避免 429；429 时重试。"""
+    """QQQ 日线收盘序列。优先 Yahoo（走代理、短 UA 避 429），失败退腾讯 K 线。"""
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/QQQ?interval=1d&range={rng}"
     last = RuntimeError("Yahoo QQQ 请求失败")
     for attempt in range(3):
@@ -88,7 +103,10 @@ def fetch_qqq_closes(rng="2y"):
         except Exception as e:
             last = e
             time.sleep(1.5 * (attempt + 1))
-    raise last
+    try:
+        return fetch_qqq_closes_tencent()
+    except Exception:
+        raise last
 
 
 # ── 信号计算 ──────────────────────────────────────────────
