@@ -1,9 +1,10 @@
-"""纳指 100 场内 ETF 定投日报（多标的比价 + 溢价档位定额）
+"""纳指 100 场内 ETF 定投日报（多标的比价 + 固定月投）
 
-溢价口径：收盘价(T) ÷ 官方净值(T 的前一个 A 股交易日) − 1。
-QDII 净值按美股收盘计价，A 股 T 日收盘时可知的最新美股信息是美股 T-1 收盘，
-故 T 日价格应与 T-1 净值配对（与券商 App / 腾讯行情显示的溢价率同口径）。
-该净值未公布时退用更早净值，并标注滞后交易日数。
+溢率 = 现价 ÷ 基金净值 − 1，两个口径并列输出：
+  券商口径：用最新已公布净值（与券商 App / 腾讯行情一致）
+  修正口径：把滞后净值按纳指涨跌折算到最新美股收盘日 —— 决策用这个
+QDII 净值通常滞后 1~2 个交易日，滞后期间溢率会被指数涨跌污染：指数隔夜下跌而净值
+尚未更新时，券商口径会**低估**真实溢率（2026-10-23 实测券商 +6.43%、真实 +9.60%）。
 """
 import sys, json, re, time, datetime, urllib.request
 from pathlib import Path
@@ -234,12 +235,12 @@ def calc_premium(price, price_date, navs, cal):
 
 
 def log_premiums(rows, codes):
-    """按价格日期记录决策池溢价，供周报回顾。{price_date: {code: prem}}，保留 120 条"""
+    """按价格日期记录决策池溢率（修正口径），供周报回顾。{price_date: {code: prem}}，保留 120 条"""
     log = _load(PREM_LOG, {})
     for c in codes:
         r = rows.get(c, {})
-        if r.get("prem") is not None and r.get("price_date"):
-            log.setdefault(r["price_date"], {})[c] = round(r["prem"], 2)
+        if r.get("prem_use") is not None and r.get("price_date"):
+            log.setdefault(r["price_date"], {})[c] = round(r["prem_use"], 2)
     _save(PREM_LOG, dict(sorted(log.items())[-120:]))
 
 
@@ -307,15 +308,18 @@ def render_position(rows):
         air = mv - navval
         L.append(f"  {p['code']} {r['name']}  {sh} 股 @ {cost:.4f}")
         L.append(f"    现价 {px:.3f}  市值 {mv:,.0f}  盈亏 {mv - total:+,.0f}（{(mv - total) / total * 100:+.2f}%）")
-        L.append(f"    NAV资产 {navval:,.0f} + 溢价空气 {air:,.0f}（占市值 {air / mv * 100:.1f}%）")
-        L.append(f"    当前溢价 {prem:+.2f}%")
-        L.append(f"    回本需价格 {cost:.4f}（{(cost / px - 1) * 100:+.2f}%），对应溢价 {(cost / nav - 1) * 100:+.2f}%")
+        L.append(f"    NAV资产 {navval:,.0f} + 溢率空气 {air:,.0f}（占市值 {air / mv * 100:.1f}%）")
+        if r.get("prem_est") is not None:
+            L.append(f"    当前溢率 {prem:+.2f}%（修正口径；券商口径 {r['prem']:+.2f}%）")
+        else:
+            L.append(f"    当前溢率 {prem:+.2f}%")
+        L.append(f"    回本需价格 {cost:.4f}（{(cost / px - 1) * 100:+.2f}%），对应溢率 {(cost / nav - 1) * 100:+.2f}%")
         a, w = tg.get("add_below_prem"), tg.get("watch_above_prem")
         if a is not None:
             pa = nav * (1 + a / 100)
-            L.append(f"    加仓线 溢价<{a:.0f}% → 价格 {pa:.3f}（还需 {(pa / px - 1) * 100:+.1f}%）")
+            L.append(f"    加仓线 溢率<{a:.0f}% → 价格 {pa:.3f}（还需 {(pa / px - 1) * 100:+.1f}%）")
         if w is not None and prem >= w:
-            L.append(f"    ⚠ 溢价 {prem:.2f}% 已触及警戒线 {w:.0f}%")
+            L.append(f"    ⚠ 溢率 {prem:.2f}% 已触及警戒线 {w:.0f}%")
     L.append(f"  依据：{best_note(rows, pos)}")
     return L
 
@@ -324,11 +328,11 @@ def best_note(rows, pos):
     c = pos["positions"][0]["code"] if pos.get("positions") else ""
     r = rows.get(c, {})
     if r.get("nav_est"):
-        return (f"溢价用纳指修正口径（官方净值 {r['nav_date']} {r['nav']:.4f} 滞后 {r.get('lag', 0)} 日，"
-                f"已按纳指折算至 {r['est_ref']}；官方口径 {r['prem']:+.2f}%）")
+        return (f"溢率用纳指修正口径（官方净值 {r['nav_date']} {r['nav']:.4f} 滞后 {r.get('lag', 0)} 个交易日，"
+                f"已按纳指折算至 {r['est_ref']}；券商口径 {r['prem']:+.2f}%）")
     if r.get("price_date") and r.get("nav_date"):
         return f"市价 {r['price_date']} ÷ 净值 {r['nav_date']}，净值滞后 {r.get('lag', 0)} 个交易日"
-    return "净值口径见上方【溢价口径】"
+    return "净值口径见上方【溢率口径】"
 
 
 # ── 主流程 ────────────────────────────────────────────────
@@ -424,11 +428,12 @@ def main():
                 r["prem_est"] = (price / est - 1) * 100
         else:
             errors.append(f"{c}净值")
+        r["prem_use"] = r["prem_est"] if r.get("prem_est") is not None else r.get("prem")
         rows[c] = r
 
     log_premiums(rows, pool)
     trading_today = any(q["ts"].date() == today for q in quotes.values())
-    pool_ok = sorted((rows[c] for c in pool if rows[c]["prem"] is not None), key=lambda r: r["prem"])
+    pool_ok = sorted((rows[c] for c in pool if rows[c]["prem_use"] is not None), key=lambda r: r["prem_use"])
     best = pool_ok[0] if pool_ok else None
 
     # ── 输出 ──
@@ -440,42 +445,48 @@ def main():
     if errors:
         L.append(f"  ⚠ 部分数据获取失败：{'、'.join(dict.fromkeys(errors))}")
 
-    L += ["", "【标的比价】决策池，按溢价升序"]
-    for r in pool_ok + [rows[c] for c in pool if rows[c]["prem"] is None]:
+    L += ["", "【标的比价】决策池，按溢率升序"]
+    any_corr = False
+    for r in pool_ok + [rows[c] for c in pool if rows[c]["prem_use"] is None]:
         fee = f"{r['fee']:.2f}%" if r["fee"] is not None else "费率缺失"
         tv  = f"{r['avg_turnover']:.2f}亿" if r.get("avg_turnover") else "成交缺失"
-        if r["prem"] is None:
+        if r["prem_use"] is None:
             L.append(f"  {r['code']} {r['name']}  数据缺失")
             continue
         tag = "  ← 最低" if r is best else ""
-        pce = f"（修正 {r['prem_est']:+.2f}%）" if r.get("prem_est") is not None else ""
-        L.append(f"  {r['code']} {r['name']}  价 {r['price']:.3f}  溢价 {r['prem']:+.2f}%{pce}  "
+        mark = "*" if r.get("prem_est") is not None else ""
+        any_corr = any_corr or bool(mark)
+        L.append(f"  {r['code']} {r['name']}  价 {r['price']:.3f}  溢率 {r['prem_use']:+.2f}%{mark}  "
                  f"费率 {fee}  日均 {tv}{tag}")
+    if any_corr:
+        L.append("  * 已按纳指折算到最新美股收盘日；无 * 的净值已是最新，两口径相同")
 
     if best:
-        L += ["", "【溢价口径】收盘价(T) ÷ 官方净值(T 前一交易日)",
-              f"  {best['code']}：{best['price_label']} {best['price_date']} {best['price']:.3f}"
-              f" ÷ 净值 {best['nav_date']} {best['nav']:.4f}"]
+        L += ["", "【溢率口径】现价 ÷ 基金净值 − 1",
+              f"  {best['code']} 价格 {best['price_label']} {best['price_date']} {best['price']:.3f}"]
+        L.append(f"    券商口径：÷ 官方净值 {best['nav_date']} {best['nav']:.4f}"
+                 f"（滞后 {best['lag']} 个交易日）→ {best['prem']:+.2f}%")
         if best.get("nav_est"):
-            L.append(f"  {best['code']} 纳指修正：净值 {best['nav_date']} {best['nav']:.4f}"
-                     f" × 纳指至 {best['est_ref']} → {best['nav_est']:.4f}"
-                     f" → 溢价 {best['prem_est']:+.2f}%  ← 决策用这个")
+            L.append(f"    修正口径：{best['nav']:.4f} × 纳指 {best['nav_date'][5:]}→{best['est_ref'][5:]}"
+                     f" = {best['nav_est']:.4f} → {best['prem_est']:+.2f}%  ← 决策用这个")
+            L.append("    净值未公布时券商口径会被指数涨跌污染：指数隔夜跌→低估，涨→高估")
+        else:
+            L.append("    净值已是最新，两个口径相同")
         lagged = [r["code"] for r in pool_ok if r["lag"] > 0]
         if lagged:
-            L.append(f"  ⚠ {','.join(lagged)} 净值滞后 {max(r['lag'] for r in pool_ok)} 个交易日，"
-                     "溢价含未计入的指数涨跌，仅供参考")
+            L.append(f"  ⚠ {','.join(lagged)} 净值滞后 {max(r['lag'] for r in pool_ok)} 个交易日，已按纳指折算")
 
     # 监视池提示
     wa = cfg["watch_alert"]
     alerts = [rows[c] for c in watch
-              if rows[c]["prem"] is not None and best
+              if rows[c]["prem_use"] is not None and best
               and (rows[c].get("avg_turnover") or 0) >= wa["min_avg_turnover_yi"]
-              and rows[c]["prem"] <= best["prem"] - wa["premium_gap_pct"]]
+              and rows[c]["prem_use"] <= best["prem_use"] - wa["premium_gap_pct"]]
     if alerts or fee_changes:
         L += ["", "【监视提示】"]
         for r in alerts:
-            L.append(f"  {r['code']} {r['name']} 溢价 {r['prem']:+.2f}%（比 {best['code']} 低 "
-                     f"{best['prem'] - r['prem']:.2f}pct，日均 {r['avg_turnover']:.2f}亿），可考虑调入决策池")
+            L.append(f"  {r['code']} {r['name']} 溢率 {r['prem_use']:+.2f}%（比 {best['code']} 低 "
+                     f"{best['prem_use'] - r['prem_use']:.2f}pct，日均 {r['avg_turnover']:.2f}亿），可考虑调入决策池")
         for s in fee_changes:
             L.append(f"  ⚠ {s}")
 
@@ -494,14 +505,14 @@ def main():
     if not best:
         L.append("  ★ 决策池溢价数据缺失，无法给出金额，请人工查看")
     else:
-        tier = pick_tier(best["prem"], cfg["premium_tiers"])
+        tier = pick_tier(best["prem_use"], cfg["premium_tiers"])
         amount, new_backlog = plan_amount(tier, base, backlog, cap)
         dca_now = is_dca_day(today, trading_today, cfg["dca_day"], state)
-        head = "今日定投" if dca_now else f"按当前溢价预估（下次定投：{next_dca_label(today, cfg['dca_day'], state)}）"
+        head = "今日定投" if dca_now else f"按当前溢率预估（下次定投：{next_dca_label(today, cfg['dca_day'], state)}）"
         L.append(f"  ★ {head}：{amount} 元（{tier['label']}）")
         if amount > 0:
             L.append(f"  ★ 标的：513390 纳指100ETF博时（当前持有，月投 1000 元）")
-        L.append(f"  ★ 依据：长期定投下溢价会被均值抹平，按每月 1000 元固定定投")
+        L.append(f"  ★ 依据：长期定投下溢率会被均值抹平，按每月 1000 元固定定投")
         cm = commission(amount, cfg)
         if amount > 0:
             L.append(f"  ★ 预估佣金 {cm:.2f} 元（占 {cm / amount * 100:.2f}%）")
@@ -512,7 +523,7 @@ def main():
             state["backlog"] = new_backlog
             state["last_dca_month"] = today.strftime("%Y-%m")
             state.setdefault("history", []).append({
-                "date": today.isoformat(), "code": best["code"], "premium": round(best["prem"], 2),
+                "date": today.isoformat(), "code": best["code"], "premium": round(best["prem_use"], 2),
                 "tier": tier["label"], "amount": amount, "backlog_after": new_backlog})
             _save(STATE_PATH, state)
 
