@@ -153,8 +153,9 @@ def _bar(pct, width=15):
     return "█" * filled + "░" * (width - filled)
 
 
-def render_sections(cfg, best=None):
-    """返回日报用的一节文本（list[str]）。数据源失败只影响本节。"""
+def render_sections(cfg, best=None, header=True):
+    """返回日报用的一节文本（list[str]）。数据源失败只影响本节。
+    header=False：不打印自己的分隔标题行（由日报的「附录」段统一领起）。"""
     sig_cfg = cfg_signals(cfg)
     state = load_state()
     L, dirty = [], False
@@ -173,9 +174,13 @@ def render_sections(cfg, best=None):
                 dirty = True
             pool = state.get("pool_balance", 0)
 
-        L += ["", "=" * 48, "  📉 纳指回撤（QQQ）", "=" * 48]
-        L.append(f"  QQQ {dd['current']:.2f}｜自 52 周高点 {dd['high']:.2f} 回撤 {dd['dd']:+.2f}%"
-                 f"（高点 {dd['days_since_high']} 个交易日前）")
+        if header:
+            L += ["", "=" * 48, "  📉 纳指回撤（QQQ）", "=" * 48]
+            L.append(f"  QQQ {dd['current']:.2f}｜自 52 周高点 {dd['high']:.2f} 回撤 {dd['dd']:+.2f}%"
+                     f"（高点 {dd['days_since_high']} 个交易日前）")
+        else:
+            L.append(f"  回撤 QQQ {dd['current']:.2f}｜自高点 {dd['high']:.2f} {dd['dd']:+.2f}%"
+                     f"（{dd['days_since_high']} 个交易日前）")
 
         if show_levels:
             for lv in levels:

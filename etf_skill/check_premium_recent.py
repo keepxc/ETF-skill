@@ -27,7 +27,7 @@ for date, close, _ in k[-10:]:
     if not pr:
         print(f"{date}  {close:.3f}  净值缺失")
         continue
-    est, ref = d.correct_nav(pr["nav_date"], pr["nav"], ndx)
+    est, ref, _ndx_ret, _fx_ret = d.correct_nav(pr["nav_date"], pr["nav"], ndx, d.fetch_fx_closes())
     corr = f"{(close/est-1)*100:+7.2f}%" if (est and ref != pr["nav_date"]) else "     —  "
     nd = f"{ndx[ref]:.0f}" if (est and ref in ndx) else ""
     print(f"{date}  {close:.3f}  {pr['nav']:.4f}({pr['nav_date'][5:]})  "

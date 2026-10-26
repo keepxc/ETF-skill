@@ -5,6 +5,11 @@ from pathlib import Path
 HERE = Path("/home/gyan/scripts/etf_skill")
 sys.path.insert(0, str(HERE))
 
+# 测试要隔离去重位，但生产 run_state.json 里存着当日 sent —— 跑完必须原样还原，
+# 否则「当天已推送」这个去重锚点会被测试悄悄抹掉（下一班 cron 会重推）。
+_RS = HERE / "run_state.json"
+_RS_BAK = _RS.read_bytes() if _RS.exists() else None
+
 
 class FakeDateTime(_dt.datetime):
     frozen = _dt.datetime(2026, 10, 20, 9, 30, 5)
@@ -60,5 +65,7 @@ with contextlib.redirect_stdout(buf):
 print(f"── C 同一天再跑一次  10:33:00")
 print(f"   输出行数 {len(buf.getvalue().splitlines())}（应为 0 = 静默去重）")
 
-(HERE / "run_state.json").unlink(missing_ok=True)
-print("\n[清理] run_state.json 已删除（真实推送未发生）")
+_RS.unlink(missing_ok=True)
+if _RS_BAK is not None:
+    _RS.write_bytes(_RS_BAK)
+print(f"\n[清理] run_state.json 已还原为测试前状态（{'有 sent' if _RS_BAK else '原本不存在'}，真实推送未发生）")
