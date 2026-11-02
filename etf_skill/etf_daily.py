@@ -136,9 +136,15 @@ def get_fees(codes, refresh_days):
 
 
 def fetch_ndx_pe():
+    """NDX 估值。forward(weekly) 序列 2026-08-05 后断更，改由 forwardOwn 接管，
+    current.forward 是旧值（详见 etf_weekly.get_pe 的说明）。"""
     try:
-        c = json.loads(_get(NDX_PE_URL)).get("current", {})
-        return {"t": c.get("trailing"), "f": c.get("forward")}
+        d = json.loads(_get(NDX_PE_URL))
+        c = d.get("current", {}) or {}
+        fwd, own = d.get("forward", []) or [], d.get("forwardOwn", []) or []
+        cut = str(fwd[-1]["date"]) if fwd else ""
+        tail = [x for x in own if str(x.get("date", "")) > cut and x.get("value") is not None]
+        return {"t": c.get("trailing"), "f": tail[-1]["value"] if tail else c.get("forward")}
     except Exception:
         return None
 
@@ -293,19 +299,21 @@ def fetch_marketgrep():
 # ── 开盘时点判定（不写死时间：按当日公告 + 实际成交判断） ──────
 
 def halt_notice_today(codes, today):
-    """今日是否有开市临停公告。公告在前一交易日晚间 18:30 发布，开盘前即可判读。
-    返回摘要字符串或 None"""
+    """今日是否有开市临停公告。返回 (摘要|None, ok)。
+    ok=False = 公告接口整体不可达，**不等于确认无停牌**（别把取数失败读成「今天不停牌」）。"""
     ds = today.isoformat()
+    ok = False
     for c in codes:
         try:
             d = json.loads(_get(ANN_URL.format(c=c), referer="https://fund.eastmoney.com/", timeout=10))
         except Exception:
             continue
+        ok = True
         for it in (d.get("Data") or []):
             t = it.get("TITLE") or ""
             if str(it.get("PUBLISHDATEDesc") or "")[:10] == ds and any(k in t for k in ("停牌", "停复牌")):
-                return f"{c} 临停公告"
-    return None
+                return f"{c} 临停公告", ok
+    return None, ok
 
 
 def traded_today(q, today):
@@ -466,7 +474,7 @@ def main():
         return
 
     # ② 当日开市临停公告（前一交易日晚间 18:30 发布，开盘前已可知）
-    halt = halt_notice_today(pool[:1], today)
+    halt, halt_ok = halt_notice_today(pool[:1], today)
     if halt and now.time() < datetime.time(10, 31):
         defer(f"{halt}，开市停牌至 10:30")
         return
@@ -504,7 +512,7 @@ def main():
     # ⑤ 无公告却开盘无成交 → 按临停处理，等复牌后再报
     if (not halt and not traded_today(quotes.get(pool[0]), today)
             and datetime.time(9, 32) <= now.time() < datetime.time(10, 31)):
-        defer("开盘无成交（疑似临停）")
+        defer("开盘无成交（疑似临停）" if halt_ok else "开盘无成交（疑似临停；公告接口不可达）")
         return
 
     fees, fee_changes, fee_failed = get_fees(pool + watch, cfg["fee_refresh_days"])

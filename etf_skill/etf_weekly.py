@@ -49,12 +49,22 @@ def _median(values):
 # ── 数据获取 ────────────────────────────────────────────────
 
 def get_pe():
+    """预期 PE。⚠ terminal 的 weekly `forward` 序列在 2026-08-05 后断更，
+    之后由 `forwardOwn`（自算 blended-fy1fy2，日频）接管；两段在重叠日几乎相同
+    （22.41 vs 22.37），可直接拼接。**`current.forward` 是断更那天的旧值，不能用**——
+    2026-11-02 实测：用它得 22.37/P59「中性」，真实 forwardOwn 是 19.48/P40「便宜」。"""
     d = _get(URLS["pe"])
-    c = d.get("current", {})
-    fwd_hist = [x["value"] for x in d.get("forward", []) if x.get("value") is not None]
-    return {"trailing": c.get("trailing"), "forward": c.get("forward"),
-            "fwd_pct": pct_rank(fwd_hist, c["forward"]) if c.get("forward") else None,
-            "fwd_med": _median(fwd_hist), "fwd_since": d.get("historyStarts", {}).get("forward", "")[:4]}
+    fwd, own = d.get("forward", []) or [], d.get("forwardOwn", []) or []
+    cut = str(fwd[-1]["date"]) if fwd else ""
+    rows = fwd + [x for x in own if str(x.get("date", "")) > cut]
+    hist = [x["value"] for x in rows if x.get("value") is not None]
+    if not hist:
+        return None
+    cur = hist[-1]
+    return {"trailing": d.get("current", {}).get("trailing"), "forward": cur,
+            "fwd_pct": pct_rank(hist, cur), "fwd_med": _median(hist),
+            "fwd_since": d.get("historyStarts", {}).get("forward", "")[:4],
+            "fwd_asof": str(rows[-1].get("date", ""))}
 
 
 def get_series_stat(key):
