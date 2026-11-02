@@ -85,10 +85,19 @@ def get_ndx_price():
 
 
 def get_ai_val():
+    """AI 龙头：预期 PE + 隐含盈利增速（trailing/fwd 之比 = 市场定价的 EPS 增长）。"""
     d = _get(URLS["ai_val"])
-    cur = [(m["ticker"], m.get("snapshot", {}).get("forwardPE")) for m in d.get("members", [])]
+    cur = []
+    for m in d.get("members", []):
+        snap = m.get("snapshot", {})
+        fp, tp = snap.get("forwardPE"), snap.get("trailingPE")
+        if not fp:
+            continue
+        growth = (tp / fp - 1) * 100 if tp and fp else None
+        cur.append({"t": m["ticker"], "fp": round(fp, 1),
+                    "g": round(growth) if growth is not None else None})
     ref = [(r["ticker"], r["name"], r["peakForwardPE"], r.get("peakDate", "")) for r in d.get("reference_1999", [])]
-    return {"cur": [(t, round(p, 1)) for t, p in cur if p], "ref": ref}
+    return {"cur": cur, "ref": ref}
 
 
 # ── 定投执行回顾 ─────────────────────────────────────────────
@@ -107,7 +116,7 @@ def dca_review(today):
     cfg = daily._load(daily.CONFIG_PATH, None)
     state = daily._load(daily.STATE_PATH, {"backlog": 0, "last_dca_month": None, "history": []})
     log = daily._load(daily.PREM_LOG, {})
-    L = ["", "④ 本周执行"]
+    L = ["", "④ 本周执行 " + "─" * 14]
 
     def window(lo, hi):
         return {d: v for d, v in log.items() if lo < d <= hi}
@@ -124,15 +133,15 @@ def dca_review(today):
         p = [d[main_c] for d in last_wk.values() if main_c in d]
         chg = sum(v) / len(v) - sum(p) / len(p) if p else None
         direc = "" if chg is None else ("上行" if chg > 0.5 else "回落" if chg < -0.5 else "横")
-        L.append(f"  溢率 {main_c}  {min(v):.1f}~{max(v):.1f}%，最新 {v[-1]:.2f}%"
-                 + (f"，较上周 {chg:+.2f}pct → 高位{direc}" if chg is not None else ""))
-        others = "｜".join(f"{c} {latest[c]:.1f}%" for c in cfg["pool"] if c != main_c and c in latest)
+        L.append(f"  溢率 {main_c}  {min(v):.1f}~{max(v):.1f}% · 最新 {v[-1]:.1f}%"
+                 + (f" · 较上周 {chg:+.2f}pct → 高位{direc}" if chg is not None else ""))
+        others = " · ".join(f"{c} {latest[c]:.1f}%" for c in cfg["pool"] if c != main_c and c in latest)
         if others:
             L.append(f"  其他 {others}（都更贵，无切换价值）")
 
     nd = next_dca_date(today, cfg["dca_day"], state)
     due = f"{nd:%m-%d}（{(nd - today).days} 天后）" if nd else "本月已过且未执行 → 下一个交易日"
-    L.append(f"  定投 下次 {due} {cfg['monthly_base_amount']} 元｜积压 {state.get('backlog', 0)} 元")
+    L.append(f"  定投 下次 {due} · {cfg['monthly_base_amount']} 元 · 积压 {state.get('backlog', 0)} 元")
     hist = state.get("history", [])
     if hist:
         h = hist[-1]
@@ -153,10 +162,10 @@ def _load_trigger():
 
 # ── 输出辅助：把百分位变成「一眼能读」的词 + 条 ─────────────
 
-def bar(pct, width=10):
+def bar(pct, width=12):
     """百分位 → 横条（left = 低，right = 高）"""
     f = int(max(0.0, min(1.0, pct / 100)) * width)
-    return "▓" * f + "░" * (width - f)
+    return "█" * f + "░" * (width - f)
 
 
 def verdict_valu(p):
@@ -188,9 +197,9 @@ def main():
                              ("历史回撤", dd), ("指数价格", ndx), ("AI估值", ai)] if not v]
 
     wk = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][today.weekday()]
-    L = ["", "=" * 48, f"  📊 纳指周报 · {today:%Y-%m-%d} {wk}", "=" * 48]
+    L = [f"📊 纳指周报 · {today:%m-%d} {wk}"]
     if failed:
-        L.append(f"  ⚠ 数据获取失败：{'、'.join(failed)}")
+        L.append(f"  ⚠ 数据缺口：{'、'.join(failed)}")
 
     # ── 顶部：三句话说完（不重复下面任何数字条） ──
     L.append("")
@@ -200,13 +209,13 @@ def main():
                  f"（历史常态回撤 -28~-40%）")
     temps = []
     if pe and pe.get("forward"):
-        temps.append(f"估值{verdict_valu(pe['fwd_pct'] or 0)}({pe['fwd_pct']})")
+        temps.append(f"估值{verdict_valu(pe['fwd_pct'] or 0)} {pe['fwd_pct']}")
     if vxn:
-        temps.append(f"情绪{verdict_vxn(vxn['pct'] or 0)}({vxn['pct']})")
+        temps.append(f"情绪{verdict_vxn(vxn['pct'] or 0)} {vxn['pct']}")
     if r5:
-        temps.append(f"回报{verdict_return(r5['pct'] or 0)}({r5['pct']})")
+        temps.append(f"回报{verdict_return(r5['pct'] or 0)} {r5['pct']}")
     if temps:
-        L.append("    温度 " + "｜".join(temps) + " — 无一进极端区")
+        L.append("    温度 " + " · ".join(temps) + " — 无一进极端区")
     cfg_w = daily._load(daily.CONFIG_PATH, {}) or {}
     st_w = daily._load(daily.STATE_PATH, {}) or {}
     nd_w = _safe(lambda: next_dca_date(today, cfg_w.get("dca_day", 15), st_w))
@@ -216,16 +225,16 @@ def main():
 
     # ── ① 贵不贵：三个维度各一句，不堆区间 ──
     if pe or r5 or vxn:
-        L += ["", "① 贵不贵（三个独立维度）"]
+        L += ["", "① 贵不贵（三个维度） " + "─" * 14]
         if pe and pe.get("forward"):
-            L.append(f"  估值 预期PE {pe['forward']}  {bar(pe['fwd_pct'] or 0)} 第{pe['fwd_pct']}"
-                     f"（中位 {pe['fwd_med']:.1f}）  {verdict_valu(pe['fwd_pct'] or 0)}")
+            L.append(f"  估值 预期PE {pe['forward']}  {bar(pe['fwd_pct'] or 0)} P{pe['fwd_pct']}"
+                     f"（中位 {pe['fwd_med']:.1f}） {verdict_valu(pe['fwd_pct'] or 0)}")
         if vxn:
-            L.append(f"  情绪 VXN {vxn['latest']:.1f}  {bar(vxn['pct'] or 0)} 第{vxn['pct']}"
-                     f"（中位 {vxn['med']:.1f}）  {verdict_vxn(vxn['pct'] or 0)}")
+            L.append(f"  情绪 VXN {vxn['latest']:.1f}  {bar(vxn['pct'] or 0)} P{vxn['pct']}"
+                     f"（中位 {vxn['med']:.1f}） {verdict_vxn(vxn['pct'] or 0)}")
         if r5:
-            L.append(f"  回报 5年年化 {r5['latest']:+.1f}%  {bar(r5['pct'] or 0)} 第{r5['pct']}"
-                     f"（中位 {r5['med']:+.1f}%）  {verdict_return(r5['pct'] or 0)}")
+            L.append(f"  回报 5年年化 {r5['latest']:+.1f}%  {bar(r5['pct'] or 0)} P{r5['pct']}"
+                     f"（中位 {r5['med']:+.1f}%） {verdict_return(r5['pct'] or 0)}")
             if r5.get("neg_pct") is not None:
                 L.append(f"       任取 5 年持有为负的历史概率 {r5['neg_pct']}%")
         pcts = [x for x in [pe.get("fwd_pct") if pe else None,
@@ -244,33 +253,45 @@ def main():
 
     # ── ② 是不是 2000 年泡沫：只比一张表 ──
     if ai and ai["cur"]:
-        L += ["", "② 是不是 2000 年泡沫（预期市盈率对比）"]
-        L.append("  现在 " + "｜".join(f"{CN_NAME.get(t, t)} {p:.0f}x" for t, p in ai["cur"]))
-        L.append("  2000 " + "｜".join(f"{CN_NAME.get(t, n.split()[0])} {p:.0f}x" for t, n, p, d in ai["ref"][:3]))
-        cur_max = max(p for _, p in ai["cur"])
+        rows = sorted(ai["cur"], key=lambda x: x["fp"])
+        name = lambda r: CN_NAME.get(r["t"], r["t"])  # noqa: E731
+        L += ["", "② AI 龙头贵不贵 " + "─" * 14]
+        cut = (len(rows) + 1) // 2
+        for i, chunk in enumerate((rows[:cut], rows[cut:])):
+            if chunk:
+                L.append(("  预期PE   " if i == 0 else "           ")
+                         + " · ".join(f"{name(r)} {r['fp']:.1f}" for r in chunk))
+        L.append("  2000峰值  " + " · ".join(f"{CN_NAME.get(t, n.split()[0])} {p:.0f}"
+                                             for t, n, p, _ in ai["ref"][:3]))
+        gs = sorted([r for r in rows if r["g"] is not None], key=lambda x: x["g"], reverse=True)
+        if gs:
+            tail = f" · {name(gs[-1])} {gs[-1]['g']:+.0f}%（唯一下滑）" if gs[-1]["g"] < 0 else ""
+            L.append(f"  盈利预期  {name(gs[0])} {gs[0]['g']:+.0f}%{tail}")
+        cur_max = max(r["fp"] for r in rows)
         ref_min = min(p for _, _, p, _ in ai["ref"][:3])
         if cur_max and ref_min:
-            L.append(f"  判读 当年最便宜的泡沫股 {ref_min:.0f}x，也高于今天最贵的 {cur_max:.0f}x"
-                     f"（差 {ref_min / cur_max:.0f} 倍）→ 不是同一种估值结构")
+            L.append(f"  判读 当年最便宜的泡沫股 {ref_min:.0f}x 仍是今天最贵（{cur_max:.0f}x）的"
+                     f" {ref_min / cur_max:.1f} 倍 → 不同结构")
+        if gs and gs[0]["g"] > 30:
+            L.append("       低 PE 是「盈利预期翻倍」撑的，不是股价便宜")
 
     # ── ③ 跌下来有多深：给区间，不给年表 ──
     if dd:
-        L += ["", "③ 跌下来会有多深（历史 5 次最大回撤）"]
-        L.append("  " + "｜".join(f"-{v:.0f}%({p[:4]})" for p, v, _ in dd))
+        L += ["", "③ 跌下来有多深 " + "─" * 14]
+        L.append("  " + " · ".join(f"-{v:.0f}%({p[:4]})" for p, v, _ in dd))
         recs = [r for _, _, r in dd if r]
         if recs:
-            L.append(f"  收复 {min(recs) / 365:.1f}~{max(recs) / 365:.1f} 年｜常态 -28%~-40%，-83% 只出现过一次")
+            L.append(f"  收复 {min(recs) / 365:.1f}~{max(recs) / 365:.1f} 年 · 常态 -28%~-40%，-83% 只出现过一次")
         L.append("  判读 -83% 那次的前提是「盈利证伪 + 估值极端」同时成立；")
-        tail = (f"今天估值在第 {pe['fwd_pct']} 分位，不具备那个前提"
+        tail = (f"今天估值 P{pe['fwd_pct']}，不具备那个前提"
                 if pe and pe.get("fwd_pct") else "今天估值分位见 ①")
         L.append(f"       {tail}")
 
     # ── ④ 本周执行 ──
     L += _safe(lambda: dca_review(today)) or ["", "④ 本周执行：读取本地配置/状态失败"]
 
-    L += ["", "─" * 48,
-          "  估值/波动只是背景；买卖只看两件事：定投日 + 溢率阈值",
-          "─" * 48, ""]
+    L += ["", "─" * 14,
+          "  估值/波动只是背景；买卖只看两件事：定投日 + 溢率阈值", ""]
     print("\n".join(L))
 
 
