@@ -182,7 +182,7 @@ def render_sections(cfg, best=None, header=True):
             L.append(f"  QQQ {dd['current']:.2f}｜自 52 周高点 {dd['high']:.2f} 回撤 {dd['dd']:+.2f}%"
                      f"（高点 {dd['days_since_high']} 个交易日前）")
         else:
-            L.append(f"  回撤 QQQ {dd['current']:.2f}｜自高点 {dd['high']:.2f} {dd['dd']:+.2f}%"
+            L.append(f"  回撤 QQQ {dd['current']:.2f} · 自高点 {dd['high']:.2f} {dd['dd']:+.2f}%"
                      f"（{dd['days_since_high']} 个交易日前）")
 
         if show_levels:

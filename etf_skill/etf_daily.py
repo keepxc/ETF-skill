@@ -30,6 +30,7 @@ WEEKDAY_CN  = ["周一","周二","周三","周四","周五","周六","周日"]
 NDX_PE_URL  = "https://historyofmarket.com/api/ndx/forward-pe.json"
 MKG_URL     = "https://www.marketgrep.com/api/summary"
 UA          = "Mozilla/5.0 (X11; Linux x86_64) Chrome/124.0 Safari/537.36"
+PREM_SCALE  = 15.0    # 溢率横条刻度（历史最高 ~14%，留一档余量）
 
 
 # 境内数据源必须直连：本机 env 代理（10808）对境内站会握手超时。
@@ -197,7 +198,7 @@ def correct_nav(nav_date, nav, ndx, fx=None):
     return nav * (1 + ndx_ret) * (1 + fx_ret), ref, ndx_ret, fx_ret
 
 
-def premium_stats(cur, code="513390"):
+def premium_stats(cur, code="513390", cur_date=None):
     """历史溢率分布与近期走势。CSV 全史 + premium_log 里更新的日期（CSV 停在 2026-09 末）。
     返回 dict(n, median, p95, p99, pctile, trend, streak) 或 None。"""
     if cur is None:
@@ -228,7 +229,16 @@ def premium_stats(cur, code="513390"):
 
     recent = [x for x in ser if x[0] >= "2026-09-01"] or ser[-30:]
     peak = max(recent, key=lambda x: x[1])
-    trend = f"{recent[0][0][5:]} {recent[0][1]:.1f} → {peak[0][5:]} {peak[1]:.1f}(峰) → 今天 {cur:.1f}"
+    if peak[0] == ser[-1][0]:
+        trend = f"{recent[0][0][5:]} {recent[0][1]:.1f} → 今天 {cur:.1f}（新高）"
+    else:
+        trend = f"{recent[0][0][5:]} {recent[0][1]:.1f} → {peak[0][5:]} {peak[1]:.1f}(峰) → 今天 {cur:.1f}"
+    delta = prev_date = None
+    if cur_date:
+        idx = next((i for i, (d, _) in enumerate(ser) if d == cur_date), None)
+        if idx:
+            prev_date = ser[idx - 1][0]
+            delta = cur - ser[idx - 1][1]
     streak = 0
     for _, x in reversed(ser):
         if x >= 8.0:
@@ -236,7 +246,8 @@ def premium_stats(cur, code="513390"):
         else:
             break
     return {"n": len(v), "median": statistics.median(v), "p95": q(0.95), "p99": q(0.99),
-            "pctile": pctile, "trend": trend, "streak": streak}
+            "pctile": pctile, "trend": trend, "streak": streak, "delta": delta,
+            "prev_date": prev_date}
 
 
 def fetch_sub_status(code):
@@ -267,14 +278,16 @@ def fetch_marketgrep():
     u, t = d.get("us", {}), d.get("turbulence", {})
     regime = u.get("regime", "")
     dspx, cor1m = u.get("dspx"), u.get("cor1m")
-    rl = "Risk ON" if "risk_on" in regime else "Risk OFF" if "risk_off" in regime else regime
+    rl = {"neutral": "中性", "risk_on": "Risk ON", "risk_off": "Risk OFF"}.get(regime, regime) or ""
+    score = u.get("exposure_score")
     disp = "分散度高" if dspx and dspx > 35 else "分散中等" if dspx and dspx > 25 else "集中度高"
-    parts = [f"VIX {u.get('vix')}", f"{rl} ({u.get('exposure_score')})", disp]
+    parts = [f"VIX {u.get('vix')}", rl + (f" {score:.0f}" if isinstance(score, (int, float)) else ""), disp]
     if cor1m is not None:
         parts.append("个股分化" if cor1m < 15 else "板块联动" if cor1m < 30 else "同涨同跌")
     if t.get("state"):
-        parts.append(f"湍流 {t['state']}")
-    return " | ".join(parts)
+        cn = {"NORMAL": "正常", "ELEVATED": "升高", "HIGH": "高", "EXTREME": "极高"}
+        parts.append("湍流 " + (cn.get(t["state"], t["state"]) or ""))
+    return " · ".join(parts)
 
 
 # ── 开盘时点判定（不写死时间：按当日公告 + 实际成交判断） ──────
@@ -386,13 +399,19 @@ def next_dca_label(today, dca_day, state):
 
 # ── 持仓敞口 ──────────────────────────────────────────────
 
+def _bar(pct, scale, width=12):
+    """pct 在 0~scale 区间内的填充条（宽度按 Telegram 手机屏取 12 格）。"""
+    filled = int(max(0.0, min(1.0, pct / scale)) * width + 0.5)
+    return "█" * filled + "░" * (width - filled)
+
+
 def render_position(rows):
     """① 我的仓位：市值 / 浮亏 / 净值与溢率空气拆分 / 回本线 / 加仓线"""
     pos = _load(POS_PATH, None)
     if not pos or not pos.get("positions"):
         return []
     tg = pos.get("trigger", {})
-    L = ["", "① 我的仓位 " + "─" * 32]
+    L = ["", "① 仓位 " + "─" * 16]
     for p in pos["positions"]:
         r = rows.get(p["code"])
         if not r or r.get("price") is None or r.get("prem") is None:
@@ -405,17 +424,16 @@ def render_position(rows):
         total, mv = sh * cost, sh * px
         navval = sh * nav
         air = mv - navval
-        L.append(f"  {p['code']} {r['name']}   {sh}股 @{cost:.4f}")
-        L.append(f"  现价 {px:.3f}   市值 {mv:,.0f}   浮亏 {mv - total:+,.0f}（{(mv - total) / total * 100:+.2f}%）")
-        L.append(f"  ├ 净值资产 {navval:,.0f} ＋ 溢率空气 {air:,.0f}"
-                 f"（占市值 {air / mv * 100:.1f}%；溢率每降1pct 亏 {navval * 0.01:,.0f}元）")
-        L.append(f"  ├ 回本 {cost:.4f} = 溢率须到 {(cost / nav - 1) * 100:+.2f}%（纳指不动就回不来）")
-        a, w = tg.get("add_below_prem"), tg.get("watch_above_prem")
-        if a is not None:
-            pa = nav * (1 + a / 100)
-            L.append(f"  └ 加仓线 溢率<{a:.0f}% → {pa:.3f}（现价 {(pa / px - 1) * 100:+.1f}%）")
+        L.append(f"  {p['code']} {r['name']} · {sh} 股 @{cost:.4f}")
+        L.append(f"  现价 {px:.3f} · 市值 {mv:,.0f} · 浮亏 {mv - total:+,.0f}（{(mv - total) / total * 100:+.1f}%）")
+        L.append("")
+        L.append(f"  真净值 {navval:,.0f} ＋ 溢率空气 {air:,.0f}（占市值 {air / mv * 100:.1f}%）")
+        L.append(f"  ↳ 溢率每降 1pct，再亏 {navval * 0.01:,.0f} 元")
+        back = (cost / nav - 1) * 100
+        L.append(f"  回本要溢率 {back:+.1f}%（纳指不动回不来）")
+        w = tg.get("watch_above_prem")
         if w is not None and prem >= w:
-            L.append(f"  ⚠ 溢率 {prem:.2f}% 已触警戒线 {w:.0f}%")
+            L.append(f"  ⚠ 溢率 {prem:.1f}% 已过警戒线 {w:.0f}%")
     return L
 
 
@@ -555,7 +573,7 @@ def main():
     base, cap = cfg["monthly_base_amount"], cfg["backlog_cap"]
     backlog = state.get("backlog", 0)
     prem_use = best["prem_use"] if best else None
-    st = premium_stats(prem_use)
+    st = premium_stats(prem_use, cur_date=today.isoformat())
     if best:
         tier = pick_tier(prem_use, cfg["premium_tiers"])
         amount, new_backlog = plan_amount(tier, base, backlog, cap)
@@ -564,105 +582,114 @@ def main():
         tier, amount, new_backlog, dca_now = None, 0, backlog, False
     trig = (_load(POS_PATH, {}) or {}).get("trigger", {})
 
-    L = ["", "=" * 48, f"  📊 纳指100 ETF 日报 · {now:%m-%d %H:%M} {WEEKDAY_CN[today.weekday()]}"]
+    L = [f"📊 纳指100 ETF · {now:%m-%d} {WEEKDAY_CN[today.weekday()]} {now:%H:%M}"]
     if not trading_today:
         L.append("  · 休市，价格为最近收盘")
     if rstate.get("defer") == today.isoformat() and not force:
         L.append(f"  ⏸ {rstate.get('defer_reason', '开盘延迟')} → 以下为复牌价")
-    L.append("=" * 48)
     if errors:
-        L.append(f"  ⚠ 数据获取失败：{'、'.join(dict.fromkeys(errors))}")
+        L.append(f"  ⚠ 数据缺口：{'、'.join(dict.fromkeys(errors))}")
 
-    # ── 结论：今天做什么 ──
+    # ── 结论：今天做什么（首屏 5 行内给完） ──
     L.append("")
     if not best:
-        L.append("  ▎结论：决策池溢率数据缺失，今日不给金额（见附录错误项）")
+        L.append("▎今天不给判断：决策池溢率数据缺失")
     else:
-        if dca_now:
-            L.append(f"  ▎结论：今天是定投日 → 买 {amount} 元 {best['code']}")
-        else:
-            L.append(f"  ▎结论：今天不动（下次定投 {next_dca_label(today, cfg['dca_day'], state)}，{amount} 元）")
-        head = f"    溢率 {best['prem_use']:+.2f}%"
+        L.append("▎今天定投 · 买 %d 元" % amount if dca_now else "▎今天不动")
+        head = f"  溢率 {prem_use:+.1f}%  "
         if st:
-            head += f" · 历史 P{st['pctile']:.0f}（中位 {st['median']:+.1f}%）"
+            head += _bar(prem_use, PREM_SCALE) + f"  P{st['pctile']:.0f}"
+            head += " 极端贵" if st["pctile"] >= 95 else (" 偏贵" if st["pctile"] >= 75 else "")
         L.append(head)
-        navb = best.get("nav_est") or best["nav"]
         a = trig.get("add_below_prem")
         if a is not None:
+            navb = best.get("nav_est") or best["nav"]
             pa = navb * (1 + a / 100)
             gap = (pa / best["price"] - 1) * 100
-            tail = "已到加仓价" if gap >= 0 else f"现价还需 {gap:+.1f}%"
-            L.append(f"    加仓线 溢率<{a:.0f}% → {pa:.3f}（{tail}）")
+            tail = "已到加仓价" if gap >= 0 else f"现价再跌 {abs(gap):.1f}%"
+            L.append(f"  加仓线 {pa:.3f}（溢率<{a:.0f}%）· {tail}")
         if amount > 0:
             cm = commission(amount, cfg)
-            tail = "；只做月投勿拆周" if (dca_now and not cfg["commission"]["free_of_min"]) else ""
-            L.append(f"    月投固定 {base} 元（佣金 {cm:.0f} 元={cm / amount * 100:.2f}%{tail}）")
-            L.append("    溢率不改金额，只改入场价（长期定投摊平）")
+            if dca_now:
+                L.append(f"  月投 {base} 元 · 佣金 {cm:.0f} 元（{cm / amount * 100:.2f}%）· 别拆周投")
+                L.append("  溢率不改金额，只改入场价")
+            else:
+                lbl = next_dca_label(today, cfg["dca_day"], state)
+                lbl = lbl if lbl.startswith("下一个") else lbl.split("（")[0].replace("月", "-").replace("日", "")
+                L.append(f"  下次定投 {lbl} · {amount} 元 · 佣金 {cm:.0f} 元")
         if backlog:
-            L.append(f"    积压资金 {backlog} 元（上限 {cap}）")
+            L.append(f"  积压 {backlog} 元（上限 {cap}）")
 
     # ── ① 我的仓位 ──
     L += render_position(rows)
 
     # ── ② 溢率贵不贵 ──
     if best:
-        L += ["", "② 溢率贵不贵 " + "─" * 30,
-              f"  决策口径 {prem_use:+.2f}%    ← 下单看这个"]
+        L += ["", "② 溢率贵不贵 " + "─" * 16]
         if best.get("nav_est"):
+            L.append(f"  下单看 {prem_use:+.1f}%（已折算）")
             diff = prem_use - best["prem"]
-            tail = "可忽略" if abs(diff) < 0.2 else ("指数隔夜跌→低估，涨→高估" if best["ndx_ret"] < 0 else "指数隔夜涨→高估")
-            L.append(f"  券商口径 {best['prem']:+.2f}%    ← 券商App显示，差 {diff:+.2f}pct（{tail}）")
+            if abs(diff) < 0.2:
+                why = "可忽略"
+            else:
+                why = f"{best.get('est_ref', '')[:5]} 纳指 {best['ndx_ret'] * 100:+.2f}% 未进净值"
+            L.append(f"  券商显示 {best['prem']:+.1f}% · 差 {diff:+.1f}pct（{why}）")
         else:
-            L.append("  券商口径 同上（净值已最新）")
+            L.append(f"  下单看 {prem_use:+.1f}% · 券商同（净值最新）")
         if st:
-            L.append(f"  历史 {st['n']} 天：中位 {st['median']:+.1f}% / P95 {st['p95']:+.1f}% / 今天 P{st['pctile']:.0f}")
-            L.append(f"  走势 {st['trend']}")
+            L.append("")
+            L.append(f"  溢率分布（全史 {st['n']} 天）")
+            L.append(f"  中位  {st['median']:+.1f}%  {_bar(st['median'], PREM_SCALE)}")
+            d = (f"  较 {(st.get('prev_date') or '')[5:]} {st['delta']:+.1f}pct"
+                 if st.get("delta") is not None else "")
+            L.append(f"  今天  {prem_use:+.1f}%  {_bar(prem_use, PREM_SCALE)}  P{st['pctile']:.0f}{d}")
+            L.append(f"  走势  {st['trend']}")
             if st["streak"] >= 3:
-                L.append(f"  连续 {st['streak']} 个交易日溢率 ≥8%（位置极端）")
+                L.append(f"  连续 {st['streak']} 个交易日 ≥8%")
         if best.get("nav_est"):
             L.append(f"  折算 {best['nav']:.4f}({best['nav_date'][5:]}) × 纳指 {best['ndx_ret'] * 100:+.2f}%"
                      f" × 汇率 {best['fx_ret'] * 100:+.2f}% = {best['nav_est']:.4f}")
 
     # ── ③ 有没有更便宜的通道 ──
+    held = {p["code"] for p in ((_load(POS_PATH, None) or {}).get("positions") or [])}
     if pool_ok:
-        L += ["", "③ 有没有更便宜的通道 " + "─" * 22]
-        parts = []
+        has_est = any(r.get("prem_est") is not None for r in pool_ok)
+        L += ["", "③ 更便宜的路子 " + "─" * 16,
+              f"  场内 {len(pool_ok)} 只" + ("（已折算）" if has_est else "")]
         for r in pool_ok:
-            mark = "*" if r.get("prem_est") is not None else ""
-            parts.append(f"{r['code']} {r['prem_use']:+.1f}%{mark}" + (" ←最低" if r is best else ""))
-        L.append("  场内 " + "｜".join(parts))
-        if any(r.get("prem_est") is not None for r in pool_ok):
-            L.append("       * 已折算到最新美股收盘（纳指+汇率）")
+            tag = "  ← 你持有" if r["code"] in held else ("  ← 最低" if r is best else "")
+            L.append(f"    {r['code']}  {r['prem_use']:+.1f}%{tag}")
         otc = cfg.get("otc") or {"code": "016055", "name": "博时纳指100联接A"}  # config 未同步时取默认
         if otc.get("code"):
             s = fetch_sub_status(otc["code"])
             if s:
                 bad = ("暂停" in s or "限大额" in s)
-                L.append(f"  场外 {otc['code']} {otc.get('name', '')}：{s}" + ("  ← 便宜通道是关的" if bad else "  ← 0% 溢率，更便宜"))
+                L.append(f"  场外 {otc['code']} {otc.get('name', '')}：{s}"
+                         + ("（额度耗尽）" if bad else "  ← 0 溢率"))
 
-    # 监视提示
+    # 监视提示（合成一行，手机屏竖排 4 行太吵）
     wa = cfg["watch_alert"]
     alerts = [rows[c] for c in watch
               if rows[c]["prem_use"] is not None and best
               and (rows[c].get("avg_turnover") or 0) >= wa["min_avg_turnover_yi"]
               and rows[c]["prem_use"] <= best["prem_use"] - wa["premium_gap_pct"]]
-    for r in alerts:
-        L.append(f"  🔍 {r['code']} {r['name']} 溢率 {r['prem_use']:+.2f}%（比 {best['code']} 低 "
-                 f"{best['prem_use'] - r['prem_use']:.2f}pct，日均 {r['avg_turnover']:.2f}亿），可考虑调入决策池")
+    if alerts:
+        parts = [f"{r['code']} {r['prem_use']:+.1f}%" for r in alerts[:4]]
+        L.append(f"  💡 更低 {'｜'.join(parts)}（比 {best['code']} 低 ≥{wa['premium_gap_pct']:.0f}pct）")
     for s in fee_changes:
         L.append(f"  ⚠ {s}")
 
     # ── 附录：数据（结论不依赖它，缺了不影响上面） ──
-    L += ["", "附录 " + "─" * 40]
+    L += ["", "附录 " + "─" * 20]
     pe, mg = fetch_ndx_pe(), fetch_marketgrep()
     if pe and pe.get("f"):
-        L.append(f"  估值 NDX PE Tr {pe['t']} / Fwd {pe['f']}")
+        L.append(f"  NDX PE {pe['t']} / 前瞻 {pe['f']}")
     if mg:
-        L.append(f"  温度 {mg}")
+        L.append(f"  {mg}")
     if best:
-        ref = f"，折算基准 {best['est_ref'][5:]} 收盘" if best.get("est_ref") else ""
-        L.append(f"  数据 实时价 {best['price_date'][5:]} {best['price']:.3f}｜官方净值 {best['nav_date'][5:]}"
-                 f"（滞后 {best['lag']} 日）{ref}")
+        ref = f" · 折算基准 {best['est_ref'][5:]}" if best.get("est_ref") else ""
+        lag = "最新" if not best["lag"] else f"滞后 {best['lag']} 日"
+        L.append(f"  数据 实时价 {best['price_date'][5:]} · 净值 {best['nav_date'][5:]}（{lag}）{ref}")
     L += etf_signals.render_sections(cfg, best, header=False)
 
     # 定投日写状态
@@ -674,7 +701,7 @@ def main():
             "tier": tier["label"], "amount": amount, "backlog_after": new_backlog})
         _save(STATE_PATH, state)
 
-    L += ["=" * 48, ""]
+    L += [""]
     if not force:
         _save(RUN_STATE, {**rstate, "sent": today.isoformat()})
     print("\n".join(L))
