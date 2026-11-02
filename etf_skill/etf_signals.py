@@ -13,12 +13,15 @@
 原一并恢复的「QQQ vs MA200 止盈信号」已于 2026-10-03 移除：
 用 QQQ 1999-2026 全历史验证后不成立（见 docs/qqq-ma200-validation.md）。
 """
+import os
 import json, time, datetime, urllib.request
 from pathlib import Path
 
 HERE       = Path(__file__).resolve().parent
 ALLOC_PATH = HERE / "alloc_state.json"
-PROXY      = "http://127.0.0.1:7890"
+PROXY      = (os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
+         or os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY")
+         or "http://127.0.0.1:10808").rstrip("/")
 UA         = "Mozilla/5.0"   # Yahoo 对完整浏览器 UA 会走 429 限流通道，短 UA 才通
 
 # 默认参数（可被 dca_config.json["signals"] 覆盖）

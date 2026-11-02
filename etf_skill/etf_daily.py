@@ -32,12 +32,19 @@ MKG_URL     = "https://www.marketgrep.com/api/summary"
 UA          = "Mozilla/5.0 (X11; Linux x86_64) Chrome/124.0 Safari/537.36"
 
 
+# 境内数据源必须直连：本机 env 代理（10808）对境内站会握手超时。
+# 2026-11-02 实测：东财 lsjz 直连 200 / 0.13s，走代理 TimeoutError → 净值整节缺失。
+_DOMESTIC   = ("eastmoney.com", "gtimg.cn", "sina.com.cn", "qq.com", "163.com")
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _get(url, encoding="utf-8", referer=None, timeout=15):
     h = {"User-Agent": UA}
     if referer:
         h["Referer"] = referer
     req = urllib.request.Request(url, headers=h)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    op = _DIRECT_OPENER.open if any(d in url for d in _DOMESTIC) else urllib.request.urlopen
+    with op(req, timeout=timeout) as resp:
         return resp.read().decode(encoding, errors="replace")
 
 
@@ -419,7 +426,7 @@ def main():
     if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    cfg   = _load(CONFIG_PATH, None)
+    cfg   = _load(CONFIG_PATH, None) or {}
     state = _load(STATE_PATH, {"backlog": 0, "last_dca_month": None, "history": []})
     now   = datetime.datetime.now()
     today = now.date()
@@ -463,17 +470,24 @@ def main():
     if qerr:
         errors.append(qerr)
 
-    # ④ 无公告却开盘无成交 → 按临停处理，等复牌后再报
-    if (not halt and not traded_today(quotes.get(pool[0]), today)
-            and datetime.time(9, 32) <= now.time() < datetime.time(10, 31)):
-        defer("开盘无成交（疑似临停）")
-        return
-
+    # ③.5 交易日历（后面 §4/§5 都要用）
     cal = []
     try:
         cal = [r[0] for r in fetch_kline(pool[0], 60)]
     except Exception as e:
         errors.append(f"交易日历({type(e).__name__})")
+
+    # ④ 非交易日（节假日/周末）→ 静默顺延到下一个交易日：不发残缺日报、不写 sent
+    day_traded = any(q["ts"].date() == today for q in quotes.values())
+    if cal and today.isoformat() not in cal and not day_traded:
+        defer("非交易日（休市）")
+        return
+
+    # ⑤ 无公告却开盘无成交 → 按临停处理，等复牌后再报
+    if (not halt and not traded_today(quotes.get(pool[0]), today)
+            and datetime.time(9, 32) <= now.time() < datetime.time(10, 31)):
+        defer("开盘无成交（疑似临停）")
+        return
 
     fees, fee_changes, fee_failed = get_fees(pool + watch, cfg["fee_refresh_days"])
     if fee_failed:
@@ -511,6 +525,26 @@ def main():
             errors.append(f"{c}净值")
         r["prem_use"] = r["prem_est"] if r.get("prem_est") is not None else r.get("prem")
         rows[c] = r
+
+    # ⑥ 决策标的数据门禁：pool[0] 净值/行情缺失 → 顺延重试，不发半成品日报。
+    #    兜底班次 = 10:02/10:32/11:02/11:32/12:02/12:32/13:02/13:32（同日已发则静默）。
+    #    13:31 之后仍缺 → 发一条明确告警并落 sent，不留「当天无报告也无报错」的黑洞。
+    if rows.get(pool[0], {}).get("prem_use") is None:
+        if now.time() < datetime.time(13, 31):
+            defer(f"{pool[0]} 数据未就绪（{'/'.join(dict.fromkeys(errors)) or '净值缺失'}）")
+            return
+        L = ["", "=" * 48,
+             f"  ⚠ 纳指100 ETF 日报 · {now:%m-%d %H:%M} {WEEKDAY_CN[today.weekday()]}",
+             "=" * 48,
+             f"  {pool[0]} 净值/行情取不到（数据源故障），今日溢率无法计算 → 不下定投判断",
+             f"  失败项 {'、'.join(dict.fromkeys(errors)) or '未记录'}",
+             f"  下次定投 {next_dca_label(today, cfg['dca_day'], state)}，{cfg['monthly_base_amount']} 元",
+             "  今天要看溢率请用券商 App，别按旧数下单", "",
+             "=" * 48, ""]
+        if not force:
+            _save(RUN_STATE, {**rstate, "sent": today.isoformat()})
+        print("\n".join(L))
+        return
 
     log_premiums(rows, pool)
     trading_today = any(q["ts"].date() == today for q in quotes.values())
