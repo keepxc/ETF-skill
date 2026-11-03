@@ -658,6 +658,18 @@ def main():
             L.append(f"  折算 {best['nav']:.4f}({best['nav_date'][5:]}) × 纳指 {best['ndx_ret'] * 100:+.2f}%"
                      f" × 汇率 {best['fx_ret'] * 100:+.2f}% = {best['nav_est']:.4f}")
 
+        # 背离：ETF 当日涨跌 vs 最近一个已完成的美股交易日（A股 T 日反映美股 T-1）
+        nks = sorted(ndx) if ndx else []
+        q = quotes.get(best["code"]) or {}
+        if len(nks) >= 2 and q.get("prev_close"):
+            ndx_day = (ndx[nks[-1]] / ndx[nks[-2]] - 1) * 100
+            etf_day = (best["price"] / q["prev_close"] - 1) * 100
+            gap = etf_day - ndx_day
+            if abs(gap) >= 0.8:
+                why = "抗跌来自溢价扩张" if gap > 0 else "跌幅更大，溢价在回吐"
+                L.append(f"  背离  纳指 {ndx_day:+.1f}% · {best['code']} {etf_day:+.1f}%"
+                         f" · {'跑赢' if gap > 0 else '跑输'} {abs(gap):.1f}pct（{why}）")
+
     # ── ③ 有没有更便宜的通道 ──
     held = {p["code"] for p in ((_load(POS_PATH, None) or {}).get("positions") or [])}
     if pool_ok:
