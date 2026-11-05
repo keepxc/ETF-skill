@@ -21,12 +21,22 @@
 | ETF 周报 | `0 21 * * 0` | `~/.hermes/scripts/etf_weekly.sh` | `etf_skill/etf_weekly.py` | 五段制：①纳指市场状态 ②ETF 价格与溢价 ③汇率与净值拆解 ④持仓与定投 ⑤综合判断（AI 龙头估值收附录） |
 | 定投月报 | `0 20 16 * *` | `~/.hermes/scripts/etf_monthly.sh` | `etf_skill/etf_monthly.py` | 定投日（15 日）次日核对：本月执行/累计投入/市值浮动/下次计划 |
 
-wrapper 内容只有两行，例如：
+wrapper 负责「跑脚本 + 双投」，例如：
 
 ```bash
-#!/bin/bash
-cd /home/gyan/scripts/etf_skill && python3 etf_alert.py
+cd /home/gyan/scripts/etf_skill
+out=$(python3 etf_alert.py); rc=$?
+ch=$(cat /home/gyan/.hermes/scripts/.etf_channel_id 2>/dev/null)
+if [ -n "$out" ] && [ -n "$ch" ]; then
+  printf '%s' "$out" | python3 /home/gyan/.hermes/scripts/tg_push.py --stdin --chat "$ch" \
+    || echo "[warn] 频道推送失败（DM 照发）" >&2
+fi
+[ -n "$out" ] && printf '%s\n' "$out"
+exit $rc
 ```
+
+两层投递：stdout 由 Hermes cron 用 `BTC1DayBot` 发到 DM；同一份内容经 `tg_push.py` 用 `BTC2dayBot` 发到私有频道。
+频道 ID 存在 `~/.hermes/scripts/.etf_channel_id`（本地文件，**不入库**）——公开仓库只放机制，不放私人频道标识。`tg_push.py --chat` 支持指定目标会话，不传则维持原来的默认 DM 行为。
 
 手动运行（与 cron 完全同路径）：
 
