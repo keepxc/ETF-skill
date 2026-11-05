@@ -103,7 +103,8 @@ def main():
             y, m = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
             nd = datetime.date(y, m, cfg.get("dca_day", 15))
         L.append(f"  下次 {nd:%Y-%m-%d}（遇休市顺延）· 基准 {cfg.get('monthly_base_amount', 1000)} 元")
-        L.append("  规则不变：金额由溢价档位定，档位见 dca_config.json")
+        L.append(f"  规则不变：每月 {cfg.get('dca_day', 15)} 日执行，"
+                 f"金额恒为 {cfg.get('monthly_base_amount', 1000)}（溢价只改入场价）")
     elif pos_err:
         L.append(f"  ⚠ {pos_err}（本月市值/浮动已跳过——这不等于无持仓）")
     else:

@@ -1,7 +1,7 @@
 """
 纳指 ETF 周报（五段制，每周日 21:00）— ①纳指市场状态 ②ETF价格与溢价 ③汇率与净值拆解
 ④持仓与定投 ⑤综合判断；Mag7 AI 龙头估值收附录。
-估值类数据只作背景参考，定投金额由定投日溢价档位决定。
+估值类数据只作背景参考，定投金额恒定，溢价只影响入场价。
 """
 import sys, json, datetime, urllib.request
 from pathlib import Path
@@ -188,26 +188,14 @@ def dca_review(today, heading=True):
     log = daily._load(daily.PREM_LOG, {})
     L = ["", "④ 本周执行 " + "─" * 14] if heading else []
 
-    def window(lo, hi):
-        return {d: v for d, v in log.items() if lo < d <= hi}
-
     t = today.isoformat()
-    this_wk = window((today - datetime.timedelta(days=7)).isoformat(), t)
-    last_wk = window((today - datetime.timedelta(days=14)).isoformat(), (today - datetime.timedelta(days=7)).isoformat())
-    if not this_wk:
-        L.append("  溢率 近 7 天无记录（日报未运行或数据缺失）")
-    else:
-        latest = this_wk[max(this_wk)]
-        main_c = min(latest, key=latest.get)
-        v = [d[main_c] for d in this_wk.values() if main_c in d]
-        p = [d[main_c] for d in last_wk.values() if main_c in d]
-        chg = sum(v) / len(v) - sum(p) / len(p) if p else None
-        direc = "" if chg is None else ("上行" if chg > 0.5 else "回落" if chg < -0.5 else "横")
-        L.append(f"  溢率 {main_c}  {min(v):.1f}~{max(v):.1f}% · 最新 {v[-1]:.1f}%"
-                 + (f" · 较上周 {chg:+.2f}pct → 高位{direc}" if chg is not None else ""))
-        others = " · ".join(f"{c} {latest[c]:.1f}%" for c in cfg["pool"] if c != main_c and c in latest)
-        if others:
-            L.append(f"  其他 {others}（都更贵，无切换价值）")
+    lo = (today - datetime.timedelta(days=7)).isoformat()
+    this_wk = {d: v for d, v in log.items() if lo < d <= t}
+    if this_wk:
+        # 只给区间，不点名标的、不下「谁更便宜」的结论：本节的快照是当天某一次记录，
+        # 与 ② 的实时价不同时点，两者给出相反结论会让整份报告自相矛盾。
+        vals = [x for snap in this_wk.values() for x in snap.values()]
+        L.append(f"  溢价 本周区间 {min(vals):.1f}~{max(vals):.1f}%（每日快照；当前值见 ②）")
 
     nd = next_dca_date(today, cfg["dca_day"], state)
     due = f"{nd:%m-%d}（{(nd - today).days} 天后）" if nd else "本月已过且未执行 → 下一个交易日"
@@ -350,7 +338,7 @@ def position_block():
     if pos is None:
         return ["  ⚠ 持仓数据不可用（position.json 读取/解析失败）——同上，先核查"]
     if not pos.get("positions"):
-        return ["  无持仓记录（文件存在且为空）· 定投计划：每月15日按溢价档位执行"]
+        return ["  无持仓记录（文件存在且为空）· 定投计划：每月15日执行，金额恒定"]
     # 交叉一致性：持仓存在但定投历史为空 → 数据不一致（两文件之一有问题）
     state = daily._load(daily.STATE_PATH, None)
     hist = (state or {}).get("history") or []
@@ -469,7 +457,7 @@ def main():
         L.append(f"  指数 距历史高点 {d:+.1f}% → {zone}")
     else:
         L.append("  指数 状态数据缺口（historyofmarket 源不可用）——不硬凑")
-    # 溢价状态（四元组：当前 / 上周 / 周变化 / 历史百分位——溢价档位直接决定投入金额）
+    # 溢价状态（当前 / 上周 / 周变化 / 历史百分位——溢率只改入场价，不改投入金额）
     if prem_blk:
         st = prem_blk["cheapest_stats"]
         code_c = prem_blk["cheapest"]
@@ -496,10 +484,9 @@ def main():
         state_v = daily._load(daily.STATE_PATH, {}) or {}
         nd = _safe(lambda: next_dca_date(today, cfg_v.get("dca_day", 15), state_v))
         when = f"下次 {nd:%m-%d}" if nd else "本月待执行"
-        L.append(f"  定投 {when} · 当前溢价对应档位：{tier.get('label') or '按档'}"
-                 f" {tier.get('amount', 0)} 元")
+        L.append(f"  定投 {when} · {tier.get('amount', 0)} 元（金额不随溢价变，溢价只改入场价）")
     else:
-        L.append("  定投 溢价数据缺口，档位无法判定——定投日照旧，金额到时按当日溢价定")
+        L.append("  定投 溢价数据缺口，金额不受影响（恒为基准额），入场价到时按当日溢价算")
     # 风险/有利
     if pe and pe.get("fwd_pct") is not None:
         if pe["fwd_pct"] >= 85:
@@ -511,7 +498,7 @@ def main():
     if notes:
         L.append("  有利 " + "、".join(notes))
     L.append("  边界 市场分析影响的是风险认识，不能随意改变定投规则——"
-             "触发动作的只有两件事：定投日 + 溢价档位")
+             "触发动作的只有两件事：定投日 + 加仓阈值")
 
     # ── 附录：AI 龙头估值（数据保留，收进附录不占主线篇幅） ──
     if ai and ai["cur"]:

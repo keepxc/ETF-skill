@@ -6,8 +6,9 @@ stdout 由 Hermes cron no_agent 投递 Telegram：无输出 = 不推送 = 频道
   halt_notice          开市临停/停复牌公告——事件去重：同基金同标题公告连续出现不重复报，
                        标题变化（可能对应停牌安排变化）才再报。局限：停牌时段在公告正文，
                        标题级去重检测不到正文内的时间变化，如实接受。
-  extreme_premium      溢价 ≥ 暂停档边界（自动取 premium_tiers 里最大的有限 below）
   extreme_premium_pctile  溢价历史百分位 ≥ 此值报（边沿触发，回落不报恢复）
+                       档位制已于 2026-10-14 废除（金额恒定，溢率只改入场价），
+                       所以判据只有百分位一条；绝对阈值会被结构性抬升顶穿，不再使用。
   sub_status_change    场外联接基金申购状态翻转（暂停/限大额/恢复开放）
   fee_change           管理费/托管费变动
 边沿触发口径：同一异常连续出现不重复打扰；状态写在 alert_state.json（gitignored）。
@@ -24,7 +25,6 @@ ALERT_STATE = HERE / "alert_state.json"
 DEFAULT_ALERTS = {
     "halt_notice": True,
     "halt_remind_every_days": 0,  # 例行停复牌公告持续中：0=完全静默，N=每 N 天重申一次
-    "extreme_premium": True,
     "extreme_premium_pctile": 95,
     "sub_status_change": True,
     "fee_change": True,
@@ -167,22 +167,15 @@ def main():
     best = rows.get(best_code) if best_code else None
 
     # ── 2) 极端溢价（决策池最低溢价者：定投实际按它执行；百分位按同 code 历史） ──
-    if best and alerts["extreme_premium"]:
+    # 档位制已废除（金额恒为 monthly_base_amount，溢率只改入场价）→ 判据只剩百分位一条。
+    if best:
         st = daily.premium_stats(best["prem"], code=best_code, cur_date=today.isoformat())
-        tiers = cfg["premium_tiers"]
-        # 暂停档边界 = 配置里最大的有限 below（溢价越过它 pick_tier 才落到最后档）
-        finite = [t["below"] for t in tiers if t.get("below") is not None]
-        extreme = max(finite) if finite else 14.0
-        if best["prem"] >= extreme:
-            if edge("extreme_prem", True, astate, force):
-                out.append(f"🚨 极端溢价 {best_code} {best['prem']:+.1f}%（≥暂停档 {extreme:.0f}%）"
-                           "——定投档位=暂停，这期不买，等回落")
-        elif st and st["pctile"] >= alerts["extreme_premium_pctile"]:
+        if st and st["pctile"] >= alerts["extreme_premium_pctile"]:
             if edge("extreme_prem_pctile", True, astate, force):
-                out.append(f"🚨 溢价 {best['prem']:+.1f}% 处历史 P{st['pctile']:.0f}（极端区）——"
-                           "定投按档位减半/暂停执行")
+                out.append(f"🚨 溢价 {best['prem']:+.1f}% 处历史 P{st['pctile']:.0f}（极端区）"
+                           f"——月投金额不变，场内买入等于多付 {best['prem']:.1f}% 通道费；")
+                out.append("   场外联接按净值成交，换通道先查申购状态")
         else:
-            edge("extreme_prem", False, astate, force)
             edge("extreme_prem_pctile", False, astate, force)
 
     # ── 3) 场外联接申购状态变化（状态翻转才报） ──
@@ -212,11 +205,8 @@ def main():
         amount, new_backlog = daily.plan_amount(
             tier, cfg["monthly_base_amount"], state.get("backlog", 0), cfg["backlog_cap"])
         cm = daily.commission(amount, cfg)
-        out.append("📌 今日定投 · 买 %s %d 元（溢率 %+.1f%% → 档位：%s）· 佣金 %.0f 元"
-                   % (best_code, amount, best["prem"],
-                      tier.get("label") or tier.get("name") or "按档", cm))
-        if amount <= 0:
-            out.append("   本期按档位暂停，金额计入积压——纪律执行，不抢反弹")
+        out.append("📌 今日定投 · 买 %s %d 元（溢率 %+.1f%%）· 佣金 %.0f 元"
+                   % (best_code, amount, best["prem"], cm))
     # 定投日恰逢休市：is_dca_day 的 day>=dca_day + 下一交易日触发逻辑自动顺延，此处不重复
 
     if out:

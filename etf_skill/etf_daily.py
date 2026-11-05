@@ -233,9 +233,12 @@ def premium_stats(cur, code="513390", cur_date=None):
     def q(p):
         return v_sorted[min(len(v_sorted) - 1, int(p * (len(v_sorted) - 1)))]
 
-    recent = [x for x in ser if x[0] >= "2026-09-01"] or ser[-30:]
+    # 判「新高」要用当前值比区间峰值，不能拿 premium_log 最新一条顶替：
+    # 盘中跑时 cur 与当日那条记录不是同一时点，用记录值判会报出
+    # 「今天 12.9（新高）」而真实峰值是 13.84（2026-11-05 实测）。
+    recent = [x for x in ser if x[0] >= "2026-09-01" and x[0] != cur_date] or ser[-30:]
     peak = max(recent, key=lambda x: x[1])
-    if peak[0] == ser[-1][0]:
+    if cur > peak[1]:
         trend = f"{recent[0][0][5:]} {recent[0][1]:.1f} → 今天 {cur:.1f}（新高）"
     else:
         trend = f"{recent[0][0][5:]} {recent[0][1]:.1f} → {peak[0][5:]} {peak[1]:.1f}(峰) → 今天 {cur:.1f}"
