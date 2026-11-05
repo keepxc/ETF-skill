@@ -12,23 +12,34 @@
 
 ## 每日/每周任务（Hermes cronjob）
 
-| 任务名 | 调度 (CST) | 入口 wrapper | 实际脚本 |
-|--------|-----------|--------------|----------|
-| ETF 513300 每日快报 | `20 9 * * 1-5` | `~/.hermes/scripts/etf_check.sh` | `etf_skill/etf_daily.py` |
-| 纳指深度周报 | `30 9 * * 1` | `~/.hermes/scripts/etf_weekly.sh` | `etf_skill/etf_weekly.py` |
+> **三层架构（2026-11 改版）**：决策频率决定报告频率——加密短线看 Radar，ETF 实际按月定投，
+> 所以 ETF 取消每日快报，改为 **每周分析 + 每月核对 + 异常才出声**。
+
+| 任务名 | 调度 (CST) | 入口 wrapper | 实际脚本 | 说明 |
+|--------|-----------|--------------|----------|------|
+| ETF 异常哨兵 | `20 9 * * 1-5` | `~/.hermes/scripts/etf_check.sh` | `etf_skill/etf_alert.py` | **静默优先**：只在临停公告/极端溢价/申购状态变化/费率变动/定投日决策时输出；平时 stdout 为空 = 不推送 |
+| ETF 周报 | `0 21 * * 0` | `~/.hermes/scripts/etf_weekly.sh` | `etf_skill/etf_weekly.py` | 五段制：①纳指市场状态 ②ETF 价格与溢价 ③汇率与净值拆解 ④持仓与定投 ⑤综合判断（AI 龙头估值收附录） |
+| 定投月报 | `0 20 16 * *` | `~/.hermes/scripts/etf_monthly.sh` | `etf_skill/etf_monthly.py` | 定投日（15 日）次日核对：本月执行/累计投入/市值浮动/下次计划 |
 
 wrapper 内容只有两行，例如：
 
 ```bash
 #!/bin/bash
-cd /home/gyan/scripts/etf_skill && python3 etf_daily.py
+cd /home/gyan/scripts/etf_skill && python3 etf_alert.py
 ```
 
 手动运行（与 cron 完全同路径）：
 
 ```bash
-bash ~/.hermes/scripts/etf_check.sh      # 每日快报
-bash ~/.hermes/scripts/etf_weekly.sh     # 深度周报
+bash ~/.hermes/scripts/etf_check.sh      # 异常哨兵（平时静默）
+bash ~/.hermes/scripts/etf_weekly.sh     # 周报
+bash ~/.hermes/scripts/etf_monthly.sh    # 月报
+```
+
+试跑（跳过边沿状态/去重，无论是否异常都输出当前状态）：
+
+```bash
+cd /home/gyan/scripts/etf_skill && ETF_FORCE=1 python3 etf_alert.py
 ```
 
 ---
@@ -39,11 +50,14 @@ bash ~/.hermes/scripts/etf_weekly.sh     # 深度周报
 
 | 文件 | 说明 |
 |------|------|
-| `etf_daily.py` | **日报**（当前 cron 用）。决策池多标的比价 → 按溢价档位给出定投金额与标的；监视池低溢价/费率变动提示；PE/VIX/市场状态 |
-| `dca_config.json` | 日报配置：月投基准、定投日、积压上限、溢价档位、佣金、决策池/监视池 |
+| `etf_alert.py` | **异常哨兵**（每日 cron 用，三层之一）。静默优先：①开市临停公告（区分高溢价期例行停复牌，措辞不过头）②极端溢价（≥暂停档边界或历史 P95，**边沿触发**，`alert_state.json` 记状态）③场外联接申购状态变化 ④费率变动 ⑤定投日决策（15 日按档位给出"今天买多少"，承接原日报唯一不可替代职责）。`ETF_FORCE=1` 试跑 |
+| `etf_weekly.py` | **周报**（每周日 21:00，三层之一）。五段制：①纳指市场状态（估值/回撤/波动**分开陈述，不合并成"贵不贵"**）②ETF 价格与溢价（决策池比价 + 历史百分位，溢价专用判读措辞）③汇率与净值拆解（纳指 vs 美元人民币各自贡献，防误判）④持仓与定投（不展示"回本需要溢价"——成本是历史结果，不构成决策依据）⑤综合判断（风险/有利 + 动作 = 按既定档位执行）。Mag7 AI 估值收附录 |
+| `etf_monthly.py` | **定投月报**（每月 16 日 20:00，三层之一）。只核对执行：本月投了吗/累计投入/市值浮动/下次计划；不回答"要不要改计划" |
+| `etf_daily.py` | 数据管道（**日报已停用**）：原每日快报。被 alert/weekly/monthly 复用的取数与计算函数都在这里（fetch_quotes/fetch_navs/calc_premium/correct_nav/premium_stats/is_dca_day/pick_tier/plan_amount 等）。手动跑仍可出完整日报，但 cron 不再调用 |
+| `dca_config.json` | 配置（gitignored，不入库）：月投基准、定投日、积压上限、溢价档位、佣金、决策池/监视池 |
 | `dca_state.json` | 运行时生成（不入库）：积压资金、上次定投月份、定投记录 |
+| `alert_state.json` | 运行时生成（不入库）：哨兵边沿状态（极端溢价是否已报过、申购状态快照） |
 | `fee_cache.json` | 运行时生成（不入库）：东财费率页抓取缓存，每 7 天刷新，检测到费率变动会提示 |
-| `etf_weekly.py` | **周报**。NDX PE / 收益拆解 / 滚动 5 年 / VXN / 回撤 / Mag7 AI 估值 六维全景 |
 | `etf_signals.py` | **择时信号**（自 legacy 恢复）：QQQ vs MA200 止盈信号 + 回撤加仓五档（资金池）。参数在 `dca_config.json` 的 `signals` 块 |
 | `alloc_state.json` | 运行时生成（不入库）：待命金 / 风暴金余额、已触发档位、上次充值月 |
 | `calc_premium_history.py` | 一次性工具：拉 513300 全量 K 线 + 历史净值，重算溢率分布 → `history_premium.csv`（非日常生产依赖） |
@@ -100,7 +114,32 @@ bash ~/.hermes/scripts/etf_weekly.sh     # 深度周报
 
 **溢率口径**：`收盘价(T) ÷ 官方净值(T 的前一个 A 股交易日) − 1`。QDII 净值按美股收盘计价，A 股 T 日收盘时可知的最新美股信息是美股 T-1 收盘，故 T 日价格与 T-1 净值配对（与券商 App / 腾讯行情显示值同口径）。09:20 盘前运行时用昨收；该净值未公布时退用更早净值并标注滞后交易日数。
 
+**周报数据质量规则**（2026-11-05 起）：
+- 每个数据源独立健康记录（名称/成败/数据截止日/条数），报告尾部输出「数据源健康」段——**响应成功 ≠ 数据有效**，数据截止日距今 >7 天显式标「旧数据，勿当最新」。
+- 汇率指标是 **USD/CNY**：上涨 = 美元升值 = QDII 人民币净值增厚（正向）。
+- 指数/汇率拆解用**乘法** `(1+n)×(1+f)−1`，时间区间美股收盘对齐同一区间；且是同期指数表现，非已公布净值变动（QDII 估值日滞后）。
+- 百分位一律注明「参照该指标自身历史分布」；滚动收益为负的占比标注「历史频率，非未来概率」。
+- 持仓三态（有/明确无/数据不可用）+ 交叉一致性（position 有持仓但 dca_state 无记录 → 提示口径不可信）；持仓文件系统只读不写，空账本永不自动清零。
+- 月报执行核验四态：成交（金额级，成交价原系统不记录如实标注）/ 未执行 / 休市顺延（给出应执行日）/ 无法核实（有标记无明细，不当作未执行）。累计只认执行记录。
+
 **定投规则**（`dca_config.json`）：每月 15 日（遇休市顺延到下一个交易日）按决策池最低溢价定档：`<6%` 投 max(1500, 1000+全部积压)、`6–10%` 投 1000、`10–14%` 投 500、`>14%` 暂停；少投部分计入积压，上限 5000。
+
+**哨兵告警开关**（`dca_config.json` 的 `alerts` 块，缺省全开，缺的键回落默认值）：
+
+```json
+"alerts": {
+  "halt_notice": true,            // 停牌/停复牌公告（事件去重：同基金同标题连续出现不重复报，标题变化才再报）
+  "extreme_premium": true,        // 溢价 ≥ 暂停档边界（自动取 premium_tiers 最大有限 below）
+  "extreme_premium_pctile": 95,   // 溢价历史百分位 ≥ 此值报（边沿触发）
+  "sub_status_change": true,      // 场外联接申购状态翻转
+  "fee_change": true              // 费率变动
+}
+```
+
+> 去重优先级：①公告 ID（新 ID 是必要条件）→ ②发布日期+基金代码（例行重申拦截）→
+> ③标题变化（辅助依据，标题变才再报）。**已知局限**：停牌时段/复牌时间在正文 PDF 里
+> （有反爬挑战页），正文级关键字段变化检测不可行——「同标题但停牌时段改了」检测不到；
+> 补偿手段：`alerts.halt_remind_every_days: N`（N 天重申一次，0=完全静默）。
 
 ---
 
