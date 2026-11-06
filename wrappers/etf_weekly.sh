@@ -5,7 +5,7 @@ cd /home/gyan/scripts/etf_skill
 out=$(python3 etf_weekly.py); rc=$?
 ch=$(cat /home/gyan/.hermes/scripts/.etf_channel_id 2>/dev/null)
 if [ -n "$out" ] && [ -n "$ch" ]; then
-  printf '%s' "$out" | python3 /home/gyan/.hermes/scripts/tg_push.py --stdin --chat "$ch" \
+  printf '%s' "$out" | python3 /home/gyan/.hermes/scripts/tg_push.py --stdin --chat "$ch" >/dev/null \
     || echo "[warn] 频道推送失败（DM 照发）" >&2
 fi
 [ -n "$out" ] && printf '%s\n' "$out"
