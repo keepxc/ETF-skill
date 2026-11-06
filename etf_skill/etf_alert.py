@@ -162,9 +162,21 @@ def main():
             continue
         est, ref, _, _ = daily.correct_nav(pr["nav_date"], pr["nav"], ndx, fx)
         prem = (price / est - 1) * 100 if (est and ref != pr["nav_date"]) else pr["prem"]
-        rows[c] = {"prem": prem, "price": price, "pctile": None}
+        rows[c] = {"prem": prem, "price": price, "pctile": None, "pdate": pdate}
     best_code = min(rows, key=lambda c: rows[c]["prem"]) if rows else None
     best = rows.get(best_code) if best_code else None
+    # 账本续供（11-06 发现：三层改造后完整日报不再被 cron 调用，premium_log.json
+    # 的唯一写入口断粮——哨兵是工作日唯一每日运行者，补上写入）。
+    # 口径差异如实说明：哨兵 9:20 开盘前跑，价格=昨收盘（与 CSV 全史收盘口径一致），
+    # 日报时代=开盘首笔；键=价格日期，两者同构，混用不影响 P 值/周报读法。
+    if rows:
+        try:
+            daily.log_premiums(
+                {c: {"prem_use": r["prem"], "price_date": r["pdate"]}
+                 for c, r in rows.items()},
+                list(rows))
+        except Exception as e:
+            out.append(f"⚠ premium_log 写入失败 {type(e).__name__}——不影响本次判断")
 
     # ── 2) 极端溢价（决策池最低溢价者：定投实际按它执行；百分位按同 code 历史） ──
     # 档位制已废除（金额恒为 monthly_base_amount，溢率只改入场价）→ 判据只剩百分位一条。
