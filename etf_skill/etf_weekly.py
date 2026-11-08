@@ -315,10 +315,11 @@ def etf_premium_block(today):
         c0, s0 = withvals[0]
         csv_note = ""
         if any(c != "513300" for c, _ in withvals):
-            csv_note = "（基底含 513300 全史，至 2026-09；其后为各基金修正口径）"
-        L.append(f"  P值样本 {s0['n']} 天（{s0['since']}~{s0['until']}）{csv_note}"
-                 "——非 513390 自身全史，属「溢价环境」分位；样本含历史代理序列与修正口径"
-                 "的衔接，不宜视为严格同口径的统计分布；P100=现有样本最高区，非历史绝对极值")
+            csv_note = " · 含 513300 全史至 2026-09"
+        L.append(f"  P值样本 {s0['n']} 天（{s0['since']}~{s0['until']}）{csv_note}")
+        # 口径注释独立成行：塞回数据行会让这一行折 6 行（原 241 列）
+        L.append("  注 其后为各基金修正口径拼接，非严格同口径；"
+                 "分位属「溢价环境」而非 513390 自身；P100=样本最高区，非绝对极值")
     # 池内整体区间：三只基金溢价同处高位 = 是 QDII 整体溢价环境，不是单只基金的现象
     prems = [r["prem"] for r in rows.values()]
     if len(prems) > 1:
@@ -548,24 +549,27 @@ def main():
     if prem_blk:
         st = prem_blk["cheapest_stats"]
         code_c = prem_blk["cheapest"]
+        # 数据行只放数，口径注释单独成行（注）：脚注塞进数据行会让首屏那行折 7 行
         seg = f"当前 {prem_blk['cheapest_prem']:+.1f}%"
         if st:
-            seg += f" · 历史百分位 P{st['pctile']:.0f}"
+            seg += f" · P{st['pctile']:.0f}"
+        footnotes = []
         wa = _safe(lambda: _premium_week_ago(code_c, today))
         if wa:
             d_week = prem_blk["cheapest_prem"] - wa[1]
-            seg += (f" · 上周 {wa[1]:+.1f}%（{wa[0]}），周变化 {d_week:+.1f}pct"
-                    f"（{'扩大' if d_week > 0 else '回落'}；按原始精度计算，展示值经四舍五入）")
+            seg += (f" · 上周 {wa[1]:+.1f}%（{wa[0]}）→ {d_week:+.1f}pct"
+                    f"{'扩大' if d_week > 0 else '回落'}")
+            footnotes.append("周变化按原始精度算，展示值四舍五入")
         else:
-            seg += " · 上周溢价数据不足，周变化无法核实（不拿上日冒充上周）"
+            seg += " · 上周数据不足，周变化无法核实"
         if st and st.get("trend"):
-            # 周报在周日发布，"今天"指的是最近交易日快照而非今日实时（②已注明），措辞统一为「最新」；
-            # 同时注明轨迹值是每日快照、时点混杂（哨兵9:20盘前昨收 / 日报开盘）——同日不同值
-            # 是快照时点差异，非盘中峰值
-            seg += (f" · 轨迹 {st['trend'].replace('今天', '最新')}"
-                    "（轨迹=每日快照，时点混杂：哨兵9:20盘前=昨收盘、日报=开盘口径"
-                    "——同日出现不同值是快照时点差异，非盘中峰值）")
+            # 周报周日发布，"今天"=最近交易日快照（②已注明），措辞统一为「最新」
+            seg += f" · 轨迹 {st['trend'].replace('今天', '最新')}"
+            footnotes.append("轨迹=每日快照（哨兵9:20=昨收 / 日报=开盘），"
+                             "同日不同值是快照时点差异，非盘中峰值")
         L.append(f"  溢价 {code_c} {seg}")
+        if footnotes:
+            L.append("  注 " + "；".join(footnotes))
         if prem_extreme:
             risks.append("溢价进历史极端区（②）")
     else:
