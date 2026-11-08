@@ -165,6 +165,10 @@ def get_series_stat(key):
 
 
 def get_drawdowns(n=5):
+    """历史回撤榜（historyofmarket drawdowns.json：时期/跌幅/收复天数）。
+    口径注意（程序内保留，报告不展开）：日期与跌幅均为该源单一价格序列给出，
+    未核验其中势是收盘价还是盘中价——不同口径的同类榜单可能相差 1~3pct，
+    因此只用于「样本内最深」的量级提示，不引用到当期判断。"""
     dds = _get(URLS["drawdowns"]).get("drawdowns", [])
     top = sorted(dds, key=lambda x: x.get("decline", 0))[:n]
     return [(x.get("period", ""), abs(x["decline"]) * 100, x.get("recovery_days")) for x in top]
@@ -183,8 +187,9 @@ def get_ndx_price():
 
 
 def get_ai_val():
-    """AI 龙头：Forward PE + 隐含盈利增速（trailing/forward 之比反推——是市价隐含的
-    EPS 增速，不是分析师预测口径；各家 snapshot 同源单快照，预测周期未逐家核验）。"""
+    """AI 龙头：Forward PE + 隐含变化（trailing/forward 之比反推——是市价隐含的
+    Forward EPS 相对 Trailing EPS 变化，不是分析师一致预期；各家 snapshot 同源
+    单快照，预测周期未逐家核验，只做横向相对参考）。"""
     d = _get(URLS["ai_val"])
     cur = []
     for m in d.get("members", []):
@@ -312,7 +317,8 @@ def etf_premium_block(today):
         if any(c != "513300" for c, _ in withvals):
             csv_note = "（基底含 513300 全史，至 2026-09；其后为各基金修正口径）"
         L.append(f"  P值样本 {s0['n']} 天（{s0['since']}~{s0['until']}）{csv_note}"
-                 "——非 513390 自身全史，属「溢价环境」分位；P100=现有样本最高区，非历史绝对极值")
+                 "——非 513390 自身全史，属「溢价环境」分位；样本含历史代理序列与修正口径"
+                 "的衔接，不宜视为严格同口径的统计分布；P100=现有样本最高区，非历史绝对极值")
     # 池内整体区间：三只基金溢价同处高位 = 是 QDII 整体溢价环境，不是单只基金的现象
     prems = [r["prem"] for r in rows.values()]
     if len(prems) > 1:
@@ -548,12 +554,17 @@ def main():
         wa = _safe(lambda: _premium_week_ago(code_c, today))
         if wa:
             d_week = prem_blk["cheapest_prem"] - wa[1]
-            seg += f" · 上周 {wa[1]:+.1f}%（{wa[0]}），周变化 {d_week:+.1f}pct（{'扩大' if d_week > 0 else '回落'})"
+            seg += (f" · 上周 {wa[1]:+.1f}%（{wa[0]}），周变化 {d_week:+.1f}pct"
+                    f"（{'扩大' if d_week > 0 else '回落'}；按原始精度计算，展示值经四舍五入）")
         else:
             seg += " · 上周溢价数据不足，周变化无法核实（不拿上日冒充上周）"
         if st and st.get("trend"):
-            # 周报在周日发布，"今天"指的是最近交易日快照而非今日实时（②已注明），措辞统一为「最新」
-            seg += f" · 轨迹 {st['trend'].replace('今天', '最新')}"
+            # 周报在周日发布，"今天"指的是最近交易日快照而非今日实时（②已注明），措辞统一为「最新」；
+            # 同时注明轨迹值是每日快照、时点混杂（哨兵9:20盘前昨收 / 日报开盘）——同日不同值
+            # 是快照时点差异，非盘中峰值
+            seg += (f" · 轨迹 {st['trend'].replace('今天', '最新')}"
+                    "（轨迹=每日快照，时点混杂：哨兵9:20盘前=昨收盘、日报=开盘口径"
+                    "——同日出现不同值是快照时点差异，非盘中峰值）")
         L.append(f"  溢价 {code_c} {seg}")
         if prem_extreme:
             risks.append("溢价进历史极端区（②）")
@@ -587,14 +598,15 @@ def main():
         rows = sorted(ai["cur"], key=lambda x: x["fp"])
         name = lambda r: CN_NAME.get(r["t"], r["t"])  # noqa: E731
         L += ["", "附录 AI 龙头估值 " + "─" * 14]
-        # 逐公司行：Forward PE + 市价隐含 EPS 增速。增速=trailing/forward−1 反推，
-        # 是市场定价隐含值，不是分析师预测；同源单快照，预测周期（FY1/FY2/TTM）未逐家核验，
-        # 只能做横向相对比较，不能当绝对估值口径
+        # 逐公司行：Forward PE + 隐含变化。getter 反推 = trailing/forward−1，
+        # 是同价下 Forward EPS 相对 Trailing EPS 的隐含变化，不是分析师一致预期；
+        # 同源单快照，预测周期（FY1/FY2/TTM）未逐家核验，只做横向相对参考
         for r in rows:
-            g = f"隐含EPS增速 {r['g']:+d}%" if r["g"] is not None else "增速数据缺"
+            g = f"fwd/trailing隐含变化 {r['g']:+d}%" if r["g"] is not None else "数据缺"
             L.append(f"  {name(r)}  Forward PE {r['fp']:.1f} · {g}")
-        L.append("  口径 Forward PE 与增速同源、同一快照时点；增速为市价隐含值（trailing/forward−1），"
-                 "非分析师预测；各家预测周期未逐家核验——保留相对比较，不作绝对判断")
+        L.append("  口径 隐含变化 = trailing PE ÷ forward PE − 1（同价下 Forward EPS 相对 "
+                 "Trailing EPS 的隐含变化），非分析师一致预期；同源单快照，各家预测周期"
+                 "未逐家核验——只做横向相对参考，不用于跨公司精确估值排名")
         L.append("  视角 对 513390 的意义是观察纳指100盈利增长是否仍有支撑，不是判断哪家股票便宜")
 
     L += ["", "─" * 14]
