@@ -21,7 +21,7 @@
 set -euo pipefail
 
 PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/kernel7-pkgs"
-SOCK=/tmp/sparkle-mihomo-api.sock
+# 原 SOCK=/tmp/sparkle-mihomo-api.sock 已移除：Sparkle 出口停用，改为运行时显式设 SPARKLE_SOCK
 DEB="$PKG/broadcom-sta-dkms_6.30.223.271-23ubuntu1.3_all.deb"
 SHA_EXPECT="73604cd799c455488bf25568ea00b12ddf77b228f398d006b7d30973f83bdabd"
 KVER_META="linux-image-generic-hwe-24.04"
@@ -129,17 +129,23 @@ verify() {  # ④ 开机后核验
   modinfo -k "$(uname -r)" wl >/dev/null 2>&1 && echo "  ✓ 当前内核有 wl 模块" || echo "  !! 当前内核没有 wl"
   rfkill list | sed 's/^/  /'
 
-  hr "代理链路（三域，走 7890）"
+  hr "代理链路（三域，出口取 HTTPS_PROXY）"
+  PROXY_URL="${HTTPS_PROXY:-}"
   for u in "https://www.okx.com/api/v5/market/books?instId=BTC-USDT&sz=1|OKX" \
            "https://api.telegram.org/|TG" \
            "https://fapi.binance.com/fapi/v1/ping|fapi"; do
     url="${u%%|*}"; name="${u##*|}"
-    timeout 20 curl -s -x http://127.0.0.1:7890 -o /dev/null -w "  $name: %{http_code} %{time_total}s\n" "$url" \
+    timeout 20 curl -s ${PROXY_URL:+-x "$PROXY_URL"} -o /dev/null -w "  $name: %{http_code} %{time_total}s\n" "$url" \
       || echo "  $name: FAILED"
   done
+  [ -z "$PROXY_URL" ] && echo "  !! 未设置 HTTPS_PROXY —— 以上为直连结果，被墙域失败属预期"
   echo "  （TG 根路径 302 = 正常）"
   echo "  --- mihomo GLOBAL（DIRECT = 事故模式）---"
-  curl -s --unix-socket "$SOCK" http://localhost/proxies/GLOBAL 2>/dev/null | head -c 300 | sed 's/^/  /' || echo "  取不到（Sparkle 没起？）"
+  if [ -n "${SPARKLE_SOCK:-}" ]; then
+    curl -s --unix-socket "$SPARKLE_SOCK" http://localhost/proxies/GLOBAL 2>/dev/null | head -c 300 | sed 's/^/  /' || echo "  取不到"
+  else
+    echo "  （跳过：原 Sparkle socket 出口已停用；需要核验时显式设 SPARKLE_SOCK）"
+  fi
 
   hr "服务与数据链"
   systemctl is-active cron docker | sed 's/^/  /'
