@@ -136,7 +136,9 @@ def get_pe():
     return {"trailing": d.get("current", {}).get("trailing"), "forward": cur,
             "fwd_pct": pct_rank(hist, cur), "fwd_med": _median(hist),
             "fwd_since": d.get("historyStarts", {}).get("forward", "")[:4],
-            "fwd_asof": str(rows[-1].get("date", ""))}
+            "fwd_asof": str(rows[-1].get("date", "")),
+            # date 供 _fetch 的「数据源健康」识别新鲜度；缺它会被误判为「成功但无日期戳」
+            "date": str(rows[-1].get("date", ""))}
 
 
 def get_series_stat(key):
@@ -550,7 +552,8 @@ def main():
         else:
             seg += " · 上周溢价数据不足，周变化无法核实（不拿上日冒充上周）"
         if st and st.get("trend"):
-            seg += f" · 轨迹 {st['trend']}"
+            # 周报在周日发布，"今天"指的是最近交易日快照而非今日实时（②已注明），措辞统一为「最新」
+            seg += f" · 轨迹 {st['trend'].replace('今天', '最新')}"
         L.append(f"  溢价 {code_c} {seg}")
         if prem_extreme:
             risks.append("溢价进历史极端区（②）")
