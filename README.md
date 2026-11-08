@@ -35,7 +35,10 @@ fi
 exit $rc
 ```
 
-两层投递：stdout 由 Hermes cron 用 `BTC1DayBot` 发到 DM；同一份内容经 `tg_push.py` 用 `BTC2dayBot` 发到私有频道。
+投递策略：
+- **哨兵 / 月报**：双投 —— stdout 由 Hermes cron 用 `BTC1DayBot` 发 DM，同一份内容经 `tg_push.py` 用 `BTC2dayBot` 发私有频道。
+- **周报**：**只发频道**（DM 不重复）；频道不可用时才回落 stdout，由 Hermes 投 DM —— 判据是 wrapper 的 stdout 为空即表示频道已收到。
+
 频道 ID 存在 `~/.hermes/scripts/.etf_channel_id`（本地文件，**不入库**）——公开仓库只放机制，不放私人频道标识。`tg_push.py --chat` 支持指定目标会话，不传则维持原来的默认 DM 行为。
 
 手动运行（与 cron 完全同路径）：
