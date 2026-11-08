@@ -256,7 +256,11 @@ def premium_stats(cur, code="513390", cur_date=None):
             break
     return {"n": len(v), "median": statistics.median(v), "p95": q(0.95), "p99": q(0.99),
             "pctile": pctile, "trend": trend, "streak": streak, "delta": delta,
-            "prev_date": prev_date}
+            "prev_date": prev_date,
+            # 样本构成披露用：分布基底 = 513300 全史 CSV + 各基金近 120 日修正口径，
+            # since/until 是混合基底的起止（周报 P 值行必须说明这是「溢价环境」分位，
+            # 对 513390 等非 513300 标的不是本基金自身全史）
+            "since": ser[0][0], "until": ser[-1][0]}
 
 
 def fetch_sub_status(code):

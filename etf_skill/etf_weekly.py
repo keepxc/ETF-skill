@@ -45,8 +45,10 @@ def _fetch(name, fn, stale_days=7):
     last, n, stale = None, None, False
     if ok:
         if isinstance(data, dict) and isinstance(data.get("date"), str):
-            # 单对象带 date 字段（如 get_ndx_price 的 {close, date, dd, ...}）
-            last, n = data["date"], 1
+            # 单对象带 date 字段（如 get_ndx_price 的 {close, date, dd, ...}）；
+            # 序列统计类自带 n_points（真实数据点数），否则健康段会写「1 条」
+            # 与正文样本数打架
+            last, n = data["date"], data.get("n_points") or 1
         elif isinstance(data, dict) and data:
             # 序列型 dict：{date: value} 或 {date: {...}}
             keys = [k for k in data.keys() if isinstance(k, str) and len(k) == 10 and k[4] == "-"]
@@ -70,20 +72,32 @@ def _fetch(name, fn, stale_days=7):
 
 
 def source_health_lines():
+    """三级分级（用户口径）：正常 / 需关注 / 不可用于判断。
+    成功 ≠ 新鲜 ≠ 可靠——AI 估值、Forward PE 这类数据不能因为接口返回成功就打勾。"""
     if not _SOURCE_HEALTH:
         return None
-    L = []
+    L = ["  分级 正常（有日期且在允许更新周期内）/ 需关注（成功但无日期戳，新鲜度无法核验）"
+         "/ 不可用（缺失、异常或超更新周期）"]
     for h in _SOURCE_HEALTH:
         if not h["ok"]:
-            L.append(f"  ✗ {h['name']}：请求失败/空响应")
+            L.append(f"  ✗ 不可用 {h['name']}：请求失败/空响应——相关字段按数据缺口处理，不硬凑")
         elif h["last"] is None:
-            L.append(f"  ✓ {h['name']}：成功（{h['n']} 条，无日期戳——新鲜度无法核验）")
+            L.append(f"  ⚠ 需关注 {h['name']}：成功但无日期戳（{h['n']} 条）——仅参考，不作当期判断")
         elif h["stale"]:
-            L.append(f"  ⚠ {h['name']}：响应成功但数据截至 {h['last']}"
-                     f"（>{h['stale_days']}天前）——已按旧数据对待，勿当最新")
+            L.append(f"  ✗ 不可用 {h['name']}：数据截至 {h['last']}，超过 {h['stale_days']} 天允许周期"
+                     "——按陈旧数据对待，不作当期判断依据")
         else:
-            L.append(f"  ✓ {h['name']}：数据截至 {h['last']}（{h['n']} 条）")
+            L.append(f"  ✓ 正常 {h['name']}：数据截至 {h['last']}（{h['n']} 条，周期内）")
     return L
+
+
+def _stale_note(name):
+    """① 各行内联陈旧标记：健康段说「不可用」时，用了该数据的具体行必须同时可见标记，
+    否则读报告的人在正文里看不到数据是旧的。"""
+    m = next((h for h in _SOURCE_HEALTH if h["name"] == name), None)
+    if m and m.get("stale") and m.get("last"):
+        return f" ⚠ 数据截至 {m['last']}（超 {m['stale_days']} 天周期）——陈旧参考，不作当期判断"
+    return ""
 
 
 def _safe(fn):
@@ -131,9 +145,21 @@ def get_series_stat(key):
     if not s:
         return None
     vals = [x["value"] for x in s]
+    # 样本画像：窗口数量 + 起止 + 中位间隔 → 频率。滚动 5 年窗口高度重叠，占比≠独立概率，
+    # 必须披露频率，读者才知道分位和「负收益占比」的可解释强度
+    gaps = sorted((datetime.date.fromisoformat(str(s[i]["date"])[:10]) -
+                   datetime.date.fromisoformat(str(s[i - 1]["date"])[:10])).days
+                  for i in range(1, len(s)))
+    med_gap = _median(gaps) if gaps else None
+    freq = ("日频" if med_gap is not None and med_gap <= 2 else
+            "周频" if med_gap is not None and med_gap <= 8 else
+            "月频" if med_gap is not None and med_gap <= 35 else
+            f"中位间隔{med_gap:.0f}天" if med_gap is not None else "未知频率")
     return {"latest": vals[-1], "date": s[-1]["date"], "pct": pct_rank(vals, vals[-1]),
             "med": _median(vals), "min": min(vals), "max": max(vals),
-            "since": s[0]["date"][:4], "neg_pct": d.get("negativePercent")}
+            "since": s[0]["date"][:4], "neg_pct": d.get("negativePercent"),
+            "n": len(s), "first": str(s[0]["date"]), "last": str(s[-1]["date"]),
+            "freq": freq, "n_points": len(s)}
 
 
 def get_drawdowns(n=5):
@@ -155,7 +181,8 @@ def get_ndx_price():
 
 
 def get_ai_val():
-    """AI 龙头：预期 PE + 隐含盈利增速（trailing/fwd 之比 = 市场定价的 EPS 增长）。"""
+    """AI 龙头：Forward PE + 隐含盈利增速（trailing/forward 之比反推——是市价隐含的
+    EPS 增速，不是分析师预测口径；各家 snapshot 同源单快照，预测周期未逐家核验）。"""
     d = _get(URLS["ai_val"])
     cur = []
     for m in d.get("members", []):
@@ -244,25 +271,60 @@ def etf_premium_block(today):
             continue
         est, ref, _, _ = daily.correct_nav(pr["nav_date"], pr["nav"], ndx, fx)
         prem = (price / est - 1) * 100 if (est and ref != pr["nav_date"]) else pr["prem"]
-        rows[c] = {"prem": prem, "price": price, "name": q["name"]}
+        rows[c] = {"prem": prem, "price": price, "name": q["name"],
+                   "pdate": pdate, "nav_date": pr["nav_date"]}
     if not rows:
         return None
     L = []
+    # 日期口径（三个日期必须说清，周日发布时防「15% 是周日实时」的误读）：
+    # 场内价格=最近 A 股交易日收盘；净值=基金估值日（QDII 滞后）；纳指行情的美股交易日见③
+    pdates = sorted({r["pdate"] for r in rows.values()})
+    ndates = sorted({r["nav_date"] for r in rows.values()})
+    pshow = pdates[-1][5:] if len(pdates) == 1 else f"{pdates[0][5:]}~{pdates[-1][5:]}"
+    nshow = ndates[-1][5:] if len(ndates) == 1 else f"{ndates[0][5:]}~{ndates[-1][5:]}"
+    wknd = "（今天非交易日，非实时）" if today.weekday() >= 5 else ""
+    L.append(f"  口径 溢价=场内价[{pshow} 收盘] vs 净值[{nshow} 估值]，以上为最近交易日快照"
+             f"{wknd}；净值滞后 1~2 日，美股行情交易日见③")
     extreme = False
     stats_by_code = {}
     for c, r in sorted(rows.items(), key=lambda x: x[1]["prem"]):
         st = _safe(lambda: daily.premium_stats(r["prem"], code=c, cur_date=today.isoformat()))
         stats_by_code[c] = st
-        extra = ""
+        extra = f" [价 {r['pdate'][5:]} · 净值 {r['nav_date'][5:]}]"
         if st:
             p = st["pctile"]
             verdict = ("溢价低位·定投友好" if p < 15 else
                        "中性" if p < 70 else "溢价偏高" if p < 85 else "溢价极端区")
-            extra = f" P{p:.0f}（{verdict}）"
+            extra = f" P{p:.0f}（{verdict}）{extra}"
             extreme = extreme or p >= 85
             if st.get("delta") is not None:
                 extra += f" · 较上日 {st['delta']:+.1f}pct"
         L.append(f"  {c} {r['name']} 溢价 {r['prem']:+.1f}%{extra}")
+    # P 值样本构成披露：基底是混合的——513300 全史 CSV + 各基金近 120 日修正口径。
+    # 对非 513300 标的，P 值是「QDII 溢价环境」分位参考，不是本基金自身全史；
+    # P100 也只是现有样本最高区，非历史绝对极值（样本覆盖不完全）。
+    withvals = [(c, st) for c, st in stats_by_code.items() if st]
+    if withvals:
+        c0, s0 = withvals[0]
+        csv_note = ""
+        if any(c != "513300" for c, _ in withvals):
+            csv_note = "（基底含 513300 全史，至 2026-09；其后为各基金修正口径）"
+        L.append(f"  P值样本 {s0['n']} 天（{s0['since']}~{s0['until']}）{csv_note}"
+                 "——非 513390 自身全史，属「溢价环境」分位；P100=现有样本最高区，非历史绝对极值")
+    # 池内整体区间：三只基金溢价同处高位 = 是 QDII 整体溢价环境，不是单只基金的现象
+    prems = [r["prem"] for r in rows.values()]
+    if len(prems) > 1:
+        L.append(f"  池内区间 决策池溢价 {min(prems):+.1f}%~{max(prems):+.1f}%"
+                 + ("——整体溢价环境，非单一基金现象" if min(prems) >= 5 else ""))
+    # 溢价收缩风险量化（与①指数涨跌是两个独立风险，分开看）：只做算术情景，非预测
+    cheapest_prem = min(prems)
+    if cheapest_prem >= 5:
+        tr = _load_trigger() or 5.0
+        shrink0 = (1 / (1 + cheapest_prem / 100) - 1) * 100
+        shrink_t = ((1 + tr / 100) / (1 + cheapest_prem / 100) - 1) * 100
+        L.append(f"  收缩风险 若净值不变，溢价 {cheapest_prem:+.1f}% 收缩至 0% → 场内价 "
+                 f"{shrink0:+.1f}%；收缩至加仓阈值 {tr:g}% → {shrink_t:+.1f}%"
+                 "（纯算术情景，非预测；实际影响取决于净值、汇率与溢价的同步变化）")
     cheapest = min(rows, key=lambda c: rows[c]["prem"])
     L.append(f"  判读 决策池最低溢价 = {cheapest}（定投按它执行）"
              if len(rows) > 1 else "  判读 单标的池，无切换选项")
@@ -410,21 +472,37 @@ def main():
     # ── ① 纳指市场状态：指数表现、回撤、波动、估值（各自的数，不合并成一句"贵不贵"） ──
     L.append("① 纳指市场状态 " + "─" * 14)
     if ndx:
+        d = ndx["dd"]
+        zone = ("回撤轻微（<10%）" if d > -10 else
+                "中等回撤（-10%~-20%）" if d > -20 else
+                "深回撤（-20%~-40%）" if d > -40 else
+                "极端回撤（< -40%）")
+        deep = (f"；样本内最深 {-dd[0][1]:.0f}%（时期 {dd[0][0]}）"
+                "——历史极端回撤不构成本轮底部预期") if dd else ""
         wr = f"，本周 {ndx['wk_ret']:+.1f}%" if ndx.get("wk_ret") is not None else ""
-        L.append(f"  指数 纳指100 {ndx['close']:,.0f}{wr}，距历史高点 {ndx['dd']:+.1f}%"
-                 f"（高点 {ndx['peak_date'][:4]} 年；历史常态回撤 -28~-40%）")
+        L.append(f"  指数 纳指100 {ndx['close']:,.0f}{wr}，距历史高点 {d:+.1f}% → {zone}{deep}"
+                 + _stale_note("指数价格(historyofmarket)"))
     if pe and pe.get("forward"):
         asof = f"，截至 {pe.get('fwd_asof', '?')}" if pe.get("fwd_asof") else ""
         L.append(f"  估值 预期PE {pe['forward']}  {bar(pe['fwd_pct'] or 0)} P{pe['fwd_pct']}"
                  f"（中位 {pe['fwd_med']:.1f}） {verdict_valu(pe['fwd_pct'] or 0)}"
-                 f"（P 值参照该指标自身历史分布{asof}）")
+                 f"（P 值参照该指标自身历史分布{asof}）"
+                 + _stale_note("NDX前瞻PE(historyofmarket)"))
     if vxn:
-        L.append(f"  波动 VXN {vxn['latest']:.1f}  {bar(vxn['pct'] or 0)} P{vxn['pct']} {verdict_vxn(vxn['pct'] or 0)}")
+        L.append(f"  波动 VXN {vxn['latest']:.1f}  {bar(vxn['pct'] or 0)} P{vxn['pct']} {verdict_vxn(vxn['pct'] or 0)}"
+                 + _stale_note("VXN(historyofmarket)")
+                 + (f"（样本 {vxn['n']} 个，{vxn['first'][:10]}~{vxn['last'][:10]}，{vxn['freq']}）"
+                    if vxn.get("n") else ""))
     if r5:
         L.append(f"  回报 历史滚动5年年化 {r5['latest']:+.1f}%，处该序列 P{r5['pct']}"
                  f"（{verdict_return(r5['pct'] or 0)}；P 值参照滚动样本自身分布）"
-                 + (f" · 滚动5年样本中收益为负的占比 {r5['neg_pct']}%（历史频率，非未来概率）"
-                    if r5.get('neg_pct') is not None else ""))
+                 + _stale_note("滚动5年(historyofmarket)"))
+        # 样本画像：滚动窗口高度重叠，日频占比≠独立发生概率
+        if r5.get("n"):
+            L.append(f"  └ 样本 {r5['n']} 个 5 年窗口（{r5['first'][:10]}~{r5['last'][:10]}，{r5['freq']}计算）"
+                     "——窗口高度重叠，「负收益占比」是历史频率参照，不是独立事件的概率")
+        if r5.get('neg_pct') is not None:
+            L.append(f"  └ 滚动5年样本中收益为负的占比 {r5['neg_pct']}%（历史频率，非未来概率）")
     if not any([ndx, pe and pe.get("forward"), vxn, r5]):
         L.append("  （① 各项数据全部不可用——本节无结论，不硬凑）")
     L.append("  注 指数估值/回撤是指数自身的数，与场内 ETF 溢价（见②）不是一回事")
@@ -451,10 +529,11 @@ def main():
     if ndx and ndx.get("dd") is not None:
         d = ndx["dd"]
         zone = ("回撤轻微（<10%）" if d > -10 else
-                "中等回撤（-10~-20%）" if d > -20 else
-                "深回撤（-20~-40%，历史常态区）" if d > -40 else
-                "极端回撤（>-40%，历史仅 2000 年）")
-        L.append(f"  指数 距历史高点 {d:+.1f}% → {zone}")
+                "中等回撤（-10%~-20%）" if d > -20 else
+                "深回撤（-20%~-40%）" if d > -40 else
+                "极端回撤（< -40%）")
+        L.append(f"  指数 距历史高点 {d:+.1f}% → {zone}（当前回撤分档可比对外，"
+                 "历史上更深的极端回撤不构成本轮底部预期）")
     else:
         L.append("  指数 状态数据缺口（historyofmarket 源不可用）——不硬凑")
     # 溢价状态（当前 / 上周 / 周变化 / 历史百分位——溢率只改入场价，不改投入金额）
@@ -500,19 +579,20 @@ def main():
     L.append("  边界 市场分析影响的是风险认识，不能随意改变定投规则——"
              "触发动作的只有两件事：定投日 + 加仓阈值")
 
-    # ── 附录：AI 龙头估值（数据保留，收进附录不占主线篇幅） ──
+    # ── 附录：AI 龙头估值（对 513390 的意义是观察纳指100盈利支撑，不是选股） ──
     if ai and ai["cur"]:
         rows = sorted(ai["cur"], key=lambda x: x["fp"])
         name = lambda r: CN_NAME.get(r["t"], r["t"])  # noqa: E731
         L += ["", "附录 AI 龙头估值 " + "─" * 14]
-        cut = (len(rows) + 1) // 2
-        for i, chunk in enumerate((rows[:cut], rows[cut:])):
-            if chunk:
-                L.append(("  预期PE   " if i == 0 else "           ")
-                         + " · ".join(f"{name(r)} {r['fp']:.1f}" for r in chunk))
-        gs = sorted([r for r in rows if r["g"] is not None], key=lambda x: x["g"], reverse=True)
-        if gs:
-            L.append(f"  盈利预期 {name(gs[0])} {gs[0]['g']:+.0f}% ~ {name(gs[-1])} {gs[-1]['g']:+.0f}%")
+        # 逐公司行：Forward PE + 市价隐含 EPS 增速。增速=trailing/forward−1 反推，
+        # 是市场定价隐含值，不是分析师预测；同源单快照，预测周期（FY1/FY2/TTM）未逐家核验，
+        # 只能做横向相对比较，不能当绝对估值口径
+        for r in rows:
+            g = f"隐含EPS增速 {r['g']:+d}%" if r["g"] is not None else "增速数据缺"
+            L.append(f"  {name(r)}  Forward PE {r['fp']:.1f} · {g}")
+        L.append("  口径 Forward PE 与增速同源、同一快照时点；增速为市价隐含值（trailing/forward−1），"
+                 "非分析师预测；各家预测周期未逐家核验——保留相对比较，不作绝对判断")
+        L.append("  视角 对 513390 的意义是观察纳指100盈利增长是否仍有支撑，不是判断哪家股票便宜")
 
     L += ["", "─" * 14]
     sh = source_health_lines()
