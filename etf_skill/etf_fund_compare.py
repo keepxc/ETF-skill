@@ -203,6 +203,66 @@ def render(codes, cfg=None, mv=None, today=None):
         L.append("  ⚠ 全部取数失败——本节跳过（不影响上面定投核对）")
         return L
 
+    # 持仓与排名基准（结论区与换仓判断共用）
+    pos_code = None
+    try:
+        posj = daily._load(daily.POS_PATH, None) or {}
+        if posj.get("positions"):
+            pos_code = posj["positions"][0].get("code")
+    except (OSError, ValueError):
+        pass
+    cur = next((r for r in tradeable if r["code"] == pos_code), None)
+    priced = [r for r in tradeable if r.get("prem") is not None]
+
+    # ── ▎结论区：先给判读，再给数据（纯罗列看不出意义） ──
+    if cur:
+        # 用「距最优多少 pct」而不是名次：并列时有 5 只同分，排名会给出虚假的精确感
+        gap_y = max(r["ytd"] for r in tradeable) - cur["ytd"]
+        low_prem = min((r["prem"] for r in priced), default=None)
+        gap_p = (cur["prem"] - low_prem) if (cur.get("prem") is not None and low_prem is not None) else None
+        seg = f"  ▎持仓 {cur['name']} 收益 {cur['ytd']:+.1f}%（距最高 {gap_y:.1f}pct）"
+        if gap_p is not None:
+            seg += f" · 溢价 {cur['prem']:+.1f}%（距最低 {gap_p:.1f}pct）"
+        if gap_p is not None and gap_y < 0.5 and gap_p > 1.0:
+            seg += " → 收益差可忽略，溢价差是全部成本"
+        L.append(seg)
+
+    # 额度动向：现金占净比连续三季同向 = 申购的钱进来但换不到外汇额度（或反过来）。
+    # 取「最危险 + 最健康」而不是「变化幅度最大」：现金绝对水平高的恶化才是风险，
+    # 从 14.6% 降到 11.1% 仍是最高的那只，改善幅度大但不说明它变安全了。
+    hist_ok = [r for r in ok if r.get("cash_hist") and len(r["cash_hist"]) >= 3]
+    rising = [r for r in hist_ok if r["cash_hist"][-1] > r["cash_hist"][-2] > r["cash_hist"][-3]]
+    falling = [r for r in hist_ok if r["cash_hist"][-1] < r["cash_hist"][-2] < r["cash_hist"][-3]]
+    bits = []
+    if rising:
+        u = max(rising, key=lambda r: r["cash_hist"][-1])
+        bits.append(f"{u['name']} {u['cash_hist'][-2]:.1f}→{u['cash_hist'][-1]:.1f}% 连升（升势里现金最高）")
+    if falling:
+        dn = min(falling, key=lambda r: r["cash_hist"][-1])
+        bits.append(f"{dn['name']} {dn['cash_hist'][-2]:.1f}→{dn['cash_hist'][-1]:.1f}% 连降")
+    if bits:
+        L.append("  ▎额度 " + " · ".join(bits))
+
+    # 候选：收益前 3 ∩ 现金最低 3 ∩ 费率不高于持仓 —— 三项同时达标才算，缺一项就不是"优等生"
+    cands = [r for r in tradeable
+             if r["code"] != pos_code and r.get("cash") is not None and r.get("prem") is not None]
+    if cands and cur:
+        top_ytd = {r["code"] for r in sorted(tradeable, key=lambda x: -x["ytd"])[:3]}
+        low_cash = {r["code"] for r in sorted(cands, key=lambda x: x["cash"])[:3]}
+        fee_cap = (cur.get("fee") or 9) + 0.05
+        triple = [r for r in cands
+                  if r["code"] in top_ytd and r["code"] in low_cash
+                  and (r.get("fee") or 9) <= fee_cap]
+        if triple:
+            c = min(triple, key=lambda r: r["prem"])
+            gap = c["prem"] - (cur.get("prem") or 0)
+            L.append(f"  ▎候选 {c['name']} {c['code']} 收益最高 · 现金 {c['cash']:.1f}% 最低档 · "
+                     f"费率 {c['fee']:.2f}% 不高于持仓 · 短板溢价 {gap:+.1f}pct")
+        else:
+            L.append("  ▎候选 无（收益前 3 ∩ 现金最低 3 ∩ 费率不高 三项没有同时达标的）")
+
+    if (cur or bits) and L:
+        L.append("")
     d1 = max((r["ytd_range"][1] or "" for r in ok), default="")
     date_str = f"{ok[0]['ytd_range'][0]} → {d1}"
     L.append(f"  口径 美元净值（剔汇率）· {date_str} · 各只净值公布日不同，统一取最晚公共日")
@@ -236,15 +296,6 @@ def render(codes, cfg=None, mv=None, today=None):
         ytd_spread = max(r["ytd"] for r in ok) - min(r["ytd"] for r in ok)
         L.append(f"  判读 净值极差 {ytd_spread:.1f}pct ≈ 费率量级；可交易标的溢价极差 {spread:.1f}pct "
                  f"→ 溢价是主变量（1pct 溢价 ≈ 10 年现金拖累）")
-        pos_code = None
-        try:
-            posj = daily._load(daily.POS_PATH, None) or {}
-            if posj.get("positions"):
-                pos_code = posj["positions"][0].get("code")
-        except (OSError, ValueError):
-            pass
-        cur = next((r for r in tradeable if r["code"] == pos_code), None)
-        priced = [r for r in tradeable if r.get("prem") is not None]
         cheap = min(priced, key=lambda r: r["prem"]) if priced else None
         if cur and cur.get("prem") is not None and cheap and cheap["code"] != cur["code"]:
             diff = cur["prem"] - cheap["prem"]
