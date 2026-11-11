@@ -8,6 +8,7 @@ import sys, os, datetime
 from pathlib import Path
 
 import etf_daily as daily
+import etf_fund_compare as fund_compare
 
 HERE = Path(__file__).resolve().parent
 
@@ -32,6 +33,8 @@ def main():
         pos = pos or {}
 
     hist = state.get("history", [])
+    mv = 0.0
+    cost = 0.0
     this_month = [h for h in hist if h.get("date", "").startswith(month)]
     # 未到核对点（16日前）且本月无记录 → 静默（试跑除外）
     if not this_month and today.day < 16 and not force:
@@ -85,7 +88,6 @@ def main():
             quotes = daily.fetch_quotes(codes)
         except Exception:
             quotes = {}
-        mv = cost = 0.0
         for p in pos["positions"]:
             sh, c0 = p["shares"], p["cost"]
             cost += sh * c0
@@ -109,6 +111,16 @@ def main():
         L.append(f"  ⚠ {pos_err}（本月市值/浮动已跳过——这不等于无持仓）")
     else:
         L.append("  无持仓记录（文件存在且为空）")
+
+    # ── 基金体检：13 只横向对比（美元净值口径 + 溢价 + 费率 + 现金趋势） ──
+    # 与上面的「执行核对」是两个维度：上面看「有没有按规则投」，这里看「投的那只还对不对」。
+    # 失败只跳过本节，不让整份月报挂掉（核对信息更重要）。
+    universe = cfg.get("fund_universe") or []
+    if universe:
+        try:
+            L += fund_compare.render(universe, cfg=cfg, mv=mv or None, today=today)
+        except Exception as e:  # noqa: BLE001 — 附加节，失败降级不阻断
+            L.append(f"  ⚠ 基金体检失败（{type(e).__name__}: {e}）——本节跳过，不影响上面的定投核对")
 
     print("\n".join(L))
 
