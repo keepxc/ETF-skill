@@ -163,7 +163,19 @@ def main():
         est, ref, _, _ = daily.correct_nav(pr["nav_date"], pr["nav"], ndx, fx)
         prem = (price / est - 1) * 100 if (est and ref != pr["nav_date"]) else pr["prem"]
         rows[c] = {"prem": prem, "price": price, "pctile": None, "pdate": pdate}
-    best_code = min(rows, key=lambda c: rows[c]["prem"]) if rows else None
+    # 定投标的 = **实际持仓标的**（不是池内最低溢价者）。
+    # 10-14 档位制废除后日报已固定写持仓标的；哨兵仍按「池内最低溢价」选，导致 11-16
+    # 提醒买 159660 而用户实际买 513390。当天两者差 0.09pct —— 噪声级的差价撑不起换标的，
+    # 但账实不符会让 dca_state/position 对账失效。
+    low_prem_code = min(rows, key=lambda c: rows[c]["prem"]) if rows else None
+    hold_code = None
+    try:
+        posj = daily._load(daily.POS_PATH, None) or {}
+        if posj.get("positions"):
+            hold_code = posj["positions"][0].get("code")
+    except (OSError, ValueError):
+        hold_code = None
+    best_code = hold_code if hold_code in rows else low_prem_code
     best = rows.get(best_code) if best_code else None
     # 账本续供（11-06 发现：三层改造后完整日报不再被 cron 调用，premium_log.json
     # 的唯一写入口断粮——哨兵是工作日唯一每日运行者，补上写入）。
@@ -180,7 +192,7 @@ def main():
 
     # ── 2) 极端溢价（决策池最低溢价者：定投实际按它执行；百分位按同 code 历史） ──
     # 档位制已废除（金额恒为 monthly_base_amount，溢率只改入场价）→ 判据只剩百分位一条。
-    if best:
+    if best and best_code:
         st = daily.premium_stats(best["prem"], code=best_code, cur_date=today.isoformat())
         if st and st["pctile"] >= alerts["extreme_premium_pctile"]:
             if edge("extreme_prem_pctile", True, astate, force):
@@ -219,6 +231,15 @@ def main():
         cm = daily.commission(amount, cfg)
         out.append("📌 今日定投 · 买 %s %d 元（溢率 %+.1f%%）· 佣金 %.0f 元"
                    % (best_code, amount, best["prem"], cm))
+        # 池内另有显著更便宜的（默认 2pct，够覆盖双边佣金与临停风险）→ 单独提示。
+        # 固定标的不能把「有更便宜通道」这个信息一起藏掉。
+        gap_th = (cfg.get("fund_compare") or {}).get("switch_prem_pct", 2.0)
+        if low_prem_code and low_prem_code != best_code:
+            alt = rows[low_prem_code]
+            gap = best["prem"] - alt["prem"]
+            if gap >= gap_th:
+                out.append("   另 %s 溢率 %+.1f%%（低 %.1f pct）——够覆盖切换成本，可核对流动性"
+                           % (low_prem_code, alt["prem"], gap))
     # 定投日恰逢休市：is_dca_day 的 day>=dca_day + 下一交易日触发逻辑自动顺延，此处不重复
 
     if out:
