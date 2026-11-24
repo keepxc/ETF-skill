@@ -103,6 +103,11 @@ def main():
     astate = daily._load(ALERT_STATE, {})
     force = bool(os.environ.get("ETF_FORCE"))
     out = []
+    if not isinstance(astate, dict):
+        # force 试跑不修状态也不告警（末尾 not force 才 _save）；正常跑重置并出声
+        if not force:
+            out.append("⚠ alert_state.json 结构异常（非 dict）——已重置，边沿去重状态重建")
+        astate = {}
 
     # ── 1) 停牌类公告（去重判定见 halt_should_alert；ID 留档不构成提醒信号） ──
     if alerts["halt_notice"]:
@@ -251,7 +256,7 @@ def main():
             out.extend(lump_plan.render(
                 lump, best["prem"], best["price"], astate, force=force, today=today))
         except Exception as e:
-            out.append(f"⚠ 一次性资金计划计算失败 {type(e).__name__}——不影响其他检查")
+            out.append(f"⚠ 一次性资金计划计算失败 {type(e).__name__}: {e}——不影响其他检查")
 
     if out:
         print("📣 ETF 异常提醒 · %s" % now.strftime("%m-%d %H:%M"))
