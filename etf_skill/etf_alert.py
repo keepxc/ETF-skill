@@ -18,6 +18,7 @@ import sys, os, json, datetime
 from pathlib import Path
 
 import etf_daily as daily
+import etf_lump_plan as lump_plan
 
 HERE = Path(__file__).resolve().parent
 ALERT_STATE = HERE / "alert_state.json"
@@ -241,6 +242,16 @@ def main():
                 out.append("   另 %s 溢率 %+.1f%%（低 %.1f pct）——够覆盖切换成本，可核对流动性"
                            % (low_prem_code, alt["prem"], gap))
     # 定投日恰逢休市：is_dca_day 的 day>=dca_day + 下一交易日触发逻辑自动顺延，此处不重复
+
+    # ── 6) 一次性资金分档投放（与定投是两笔钱；档位边沿触发，同一档只提醒一次） ──
+    # render 内部去重键 lump_reminded 写进 astate，随末尾 _save 持久化；force 只读不写。
+    lump = cfg.get("lump_sum_plan") or {}
+    if lump.get("enabled") and best:
+        try:
+            out.extend(lump_plan.render(
+                lump, best["prem"], best["price"], astate, force=force, today=today))
+        except Exception as e:
+            out.append(f"⚠ 一次性资金计划计算失败 {type(e).__name__}——不影响其他检查")
 
     if out:
         print("📣 ETF 异常提醒 · %s" % now.strftime("%m-%d %H:%M"))
