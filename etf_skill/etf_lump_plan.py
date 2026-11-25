@@ -173,7 +173,7 @@ def render(plan, prem, price, astate, force=False, today=None):
                 marks[x["key"]] = " ← 新触发" if days is None else f"（距上次 {days} 天重申）"
             elif days is not None:
                 # 冷却中的档：必须标注上次提过的天数，否则用户误以为也是今天提的（复审 MED）
-                marks[x["key"]] = f"（{days} 天前提过）"
+                marks[x["key"]] = "（今天已提过）" if days == 0 else f"（{days} 天前提过）"
         if any_due or force:
             lots = sum(x["left_lots"] for x in r["pending"])
             out.append(f"💼 一次性资金 · 当前溢率 {prem:+.2f}% · 可投 {lots} 手（{lots * lot} 股）")
