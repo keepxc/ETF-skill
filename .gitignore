@@ -24,3 +24,6 @@ etf_skill/position.json
 etf_skill/run_state.json
 etf_skill/real_exposure.py
 etf_skill/verify_fill_1016.py
+
+# harness 审查记录（生成物，不进 diff）
+reviews/
